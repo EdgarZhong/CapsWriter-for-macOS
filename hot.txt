@@ -9,7 +9,8 @@
 独显
 显存
 千问
-
+进程
+环境变量
 # ==================== 英文热词 ====================
 CapsWriter
 AI
@@ -18,3 +19,4 @@ CPU
 CUDA
 Vulkan
 Claude Code
+server

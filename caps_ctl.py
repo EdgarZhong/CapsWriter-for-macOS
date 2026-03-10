@@ -5,6 +5,7 @@ import subprocess
 import psutil
 import time
 import shutil
+import signal
 
 # 项目根目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,13 +35,39 @@ def stop_process(script_name):
         return
     
     print(f"正在停止 {script_name} (PID: {pids})...")
+    
+    # 策略：直接使用 taskkill 强制终止进程
+    # 不再尝试发送信号，避免跨进程组权限问题
     for pid in pids:
         try:
-            p = psutil.Process(pid)
-            p.terminate()
-        except psutil.NoSuchProcess:
+            if sys.platform == 'win32':
+                # /F: 强制终止
+                # /T: 终止进程树（包括子进程）
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False
+                )
+            else:
+                p = psutil.Process(pid)
+                p.kill()
+        except Exception:
             pass
-    time.sleep(1)
+
+    # 等待进程彻底消失
+    timeout = 3
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        remaining = get_running_pids(script_name)
+        if not remaining:
+            break
+        time.sleep(0.5)
+        
+    if get_running_pids(script_name):
+        print(f"警告: {script_name} 依然存在，请手动检查。")
+    else:
+        print(f"{script_name} 已停止。")
 
 def start_monitor():
     """启动监控进程"""
@@ -103,8 +130,13 @@ def switch_mode(mode):
             print("配置已更新。正在重启服务以生效...")
             
             # 停止所有相关进程
+            # 必须先停止监控，防止它自动拉起 Server
             stop_process("caps_monitor.py")
+            # 确保 Server 被彻底杀死，释放显存
             stop_process("core_server.py")
+            
+            # 等待显存释放
+            time.sleep(2)
             
             # 重启监控（监控会自动拉起 server 和 client）
             start_monitor()
