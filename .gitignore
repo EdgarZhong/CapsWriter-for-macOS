@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.gitattributes
+.gitmodules
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# CapsWriter Specific
+internal/
+models/
+assets/*.wav
+assets/temp/
+*.gguf
+*.onnx
+*.bin
+*.pt
+*.pth
+*.zip
+*.7z
+*.rar
+*.exe
+*.dll
+*.so
+*.dylib
+*.log
+
+# Keep specific DLLs if needed (optional, uncomment if you want to track them)
+# !util/llama/bin/*.dll
+2026/
+2027/
