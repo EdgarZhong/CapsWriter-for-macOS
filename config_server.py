@@ -131,7 +131,7 @@ class Qwen3ASRGGUFArgs:
     # 显卡分工策略
     # "performance": 极致性能模式（纯独显），Encoder(ONNX)->独显，Decoder(LLM)->独显 (延迟最低)
     # "saving":      训练兼容模式（纯集显/CPU），Encoder(ONNX)->集显，Decoder(LLM)->CPU (完全不占用独显)
-    gpu_selection_mode = "saving"
+    gpu_selection_mode = "performance"
 
     # 设备关键词匹配（程序会自动根据关键词搜索对应的设备ID，解决ID漂移问题）
     # 性能模式关键词

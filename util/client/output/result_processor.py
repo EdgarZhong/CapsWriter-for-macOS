@@ -306,6 +306,7 @@ class ResultProcessor:
         # LLM 处理和输出
         llm_result = None
         if Config.llm_enabled:
+            logger.info(f"LLM 已启用，转交 LLM 处理: {text}")
             from util.llm.llm_process_text import llm_process_text
             llm_result = await llm_process_text(
                 text,
@@ -313,6 +314,7 @@ class ResultProcessor:
                 matched_hotwords=potential_hotwords  # 传递上下文热词给 LLM
             )
         else:
+            logger.info(f"正在输出最终文本: {text}")
             await self._text_output.output(text, paste=paste)
             get_state().set_output_text(text)
 

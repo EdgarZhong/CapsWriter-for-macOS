@@ -7,3 +7,14 @@
 会话
 根目录
 独显
+显存
+千问
+
+# ==================== 英文热词 ====================
+CapsWriter
+AI
+GPU
+CPU
+CUDA
+Vulkan
+Claude Code
