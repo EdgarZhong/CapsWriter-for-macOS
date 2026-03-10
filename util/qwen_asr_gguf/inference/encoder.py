@@ -3,6 +3,42 @@ import os
 import time
 import numpy as np
 import onnxruntime as ort
+import subprocess
+
+def find_dml_device_id(keyword: str) -> int:
+    """
+    通过关键词查找 DirectML (DXGI) 设备 ID
+    原理：调用 wmic 获取 VideoController 列表，按顺序匹配关键词
+    """
+    try:
+        # 使用 wmic 获取显卡列表
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        cmd = "wmic path win32_videocontroller get caption /format:list"
+        
+        output = subprocess.check_output(cmd, startupinfo=startupinfo, text=True)
+        
+        devices = []
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Caption="):
+                name = line.split("=", 1)[1]
+                devices.append(name)
+        
+        print(f"--- [Encoder] 正在搜索 DirectML 设备 (关键词: '{keyword}') ---")
+        for i, name in enumerate(devices):
+            if keyword.lower() in name.lower():
+                print(f"    √ 匹配成功: ID {i} -> {name}")
+                return i
+            else:
+                print(f"    - 跳过设备: ID {i} -> {name}")
+        
+        print(f"    ! 未找到包含 '{keyword}' 的设备，回退到 ID 0")
+        return 0
+        
+    except Exception as e:
+        print(f"[Warning] 自动查找设备失败: {e}，回退到 ID 0")
+        return 0
 
 
 class FastWhisperMel:

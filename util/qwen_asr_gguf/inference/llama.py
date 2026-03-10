@@ -136,9 +136,10 @@ llama_get_embeddings = None
 llama_tokenize = None
 llama_vocab_n_tokens = None
 llama_vocab_eos = None
+llama_vocab_bos = None
 llama_token_to_piece = None
-llama_get_memory = None
-llama_memory_clear = None
+llama_get_kv_cache = None
+llama_kv_cache_clear = None
 llama_model_n_embd = None
 
 # Sampler
@@ -164,8 +165,8 @@ def init_llama_lib():
     global llama_context_default_params, llama_init_from_model, llama_free
     global llama_batch_init, llama_batch_free, llama_batch_get_one
     global llama_decode, llama_get_logits, llama_get_logits_ith, llama_get_embeddings, llama_tokenize
-    global llama_get_memory, llama_memory_clear, llama_model_n_embd
-    global llama_vocab_n_tokens, llama_vocab_eos, llama_token_to_piece
+    global llama_get_kv_cache, llama_kv_cache_clear, llama_model_n_embd, llama_vocab_bos
+    global llama_vocab_n_tokens, llama_vocab_eos, llama_vocab_bos, llama_token_to_piece
     global llama_sampler_chain_default_params, llama_sampler_chain_init, llama_sampler_chain_add
     global llama_sampler_init_greedy, llama_sampler_init_dist, llama_sampler_init_temp
     global llama_sampler_init_top_k, llama_sampler_init_top_p, llama_sampler_sample, llama_sampler_free
@@ -304,75 +305,83 @@ def init_llama_lib():
     llama_vocab_eos.argtypes = [ctypes.c_void_p]
     llama_vocab_eos.restype = llama_token
 
+    llama_vocab_bos = llama.llama_vocab_bos
+    llama_vocab_bos.argtypes = [ctypes.c_void_p]
+    llama_vocab_bos.restype = llama_token
+
     llama_token_to_piece = llama.llama_token_to_piece
     llama_token_to_piece.argtypes = [ctypes.c_void_p, llama_token, ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_bool]
     llama_token_to_piece.restype = ctypes.c_int
 
     # Memory (KV Cache)
-    llama_get_memory = llama.llama_get_memory
-    llama_get_memory.argtypes = [ctypes.c_void_p]
-    llama_get_memory.restype = ctypes.c_void_p
+    llama_get_kv_cache = llama.llama_get_kv_cache
+    llama_get_kv_cache.argtypes = [ctypes.c_void_p]
+    llama_get_kv_cache.restype = ctypes.c_void_p
 
-    llama_memory_clear = llama.llama_memory_clear
-    llama_memory_clear.argtypes = [ctypes.c_void_p, ctypes.c_bool]
-    llama_memory_clear.restype = None
+    llama_kv_cache_clear = llama.llama_kv_cache_clear
+    llama_kv_cache_clear.argtypes = [ctypes.c_void_p]
+    llama_kv_cache_clear.restype = None
 
     # Sampler
-    llama_sampler_chain_default_params = llama.llama_sampler_chain_default_params
-    llama_sampler_chain_default_params.argtypes = []
-    llama_sampler_chain_default_params.restype = llama_sampler_chain_params
+    try:
+        llama_sampler_chain_default_params = llama.llama_sampler_chain_default_params
+        llama_sampler_chain_default_params.argtypes = []
+        llama_sampler_chain_default_params.restype = llama_sampler_chain_params
 
-    llama_sampler_chain_init = llama.llama_sampler_chain_init
-    llama_sampler_chain_init.argtypes = [llama_sampler_chain_params]
-    llama_sampler_chain_init.restype = ctypes.c_void_p
+        llama_sampler_chain_init = llama.llama_sampler_chain_init
+        llama_sampler_chain_init.argtypes = [llama_sampler_chain_params]
+        llama_sampler_chain_init.restype = ctypes.c_void_p
 
-    llama_sampler_chain_add = llama.llama_sampler_chain_add
-    llama_sampler_chain_add.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    llama_sampler_chain_add.restype = None
+        llama_sampler_chain_add = llama.llama_sampler_chain_add
+        llama_sampler_chain_add.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        llama_sampler_chain_add.restype = None
 
-    llama_sampler_init_greedy = llama.llama_sampler_init_greedy
-    llama_sampler_init_greedy.argtypes = []
-    llama_sampler_init_greedy.restype = ctypes.c_void_p
+        llama_sampler_init_greedy = llama.llama_sampler_init_greedy
+        llama_sampler_init_greedy.argtypes = []
+        llama_sampler_init_greedy.restype = ctypes.c_void_p
 
-    llama_sampler_init_dist = llama.llama_sampler_init_dist
-    llama_sampler_init_dist.argtypes = [ctypes.c_uint32]
-    llama_sampler_init_dist.restype = ctypes.c_void_p
+        llama_sampler_init_dist = llama.llama_sampler_init_dist
+        llama_sampler_init_dist.argtypes = [ctypes.c_uint32]
+        llama_sampler_init_dist.restype = ctypes.c_void_p
 
-    llama_sampler_init_temp = llama.llama_sampler_init_temp
-    llama_sampler_init_temp.argtypes = [ctypes.c_float]
-    llama_sampler_init_temp.restype = ctypes.c_void_p
+        llama_sampler_init_temp = llama.llama_sampler_init_temp
+        llama_sampler_init_temp.argtypes = [ctypes.c_float]
+        llama_sampler_init_temp.restype = ctypes.c_void_p
 
-    llama_sampler_init_top_k = llama.llama_sampler_init_top_k
-    llama_sampler_init_top_k.argtypes = [ctypes.c_int32]
-    llama_sampler_init_top_k.restype = ctypes.c_void_p
+        llama_sampler_init_top_k = llama.llama_sampler_init_top_k
+        llama_sampler_init_top_k.argtypes = [ctypes.c_int32]
+        llama_sampler_init_top_k.restype = ctypes.c_void_p
 
-    llama_sampler_init_top_p = llama.llama_sampler_init_top_p
-    llama_sampler_init_top_p.argtypes = [ctypes.c_float, ctypes.c_size_t]
-    llama_sampler_init_top_p.restype = ctypes.c_void_p
+        llama_sampler_init_top_p = llama.llama_sampler_init_top_p
+        llama_sampler_init_top_p.argtypes = [ctypes.c_float, ctypes.c_size_t]
+        llama_sampler_init_top_p.restype = ctypes.c_void_p
 
-    llama_sampler_sample = llama.llama_sampler_sample
-    llama_sampler_sample.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
-    llama_sampler_sample.restype = llama_token
+        llama_sampler_sample = llama.llama_sampler_sample
+        llama_sampler_sample.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
+        llama_sampler_sample.restype = llama_token
 
-    llama_sampler_free = llama.llama_sampler_free
-    llama_sampler_free.argtypes = [ctypes.c_void_p]
-    llama_sampler_free.restype = None
+        llama_sampler_free = llama.llama_sampler_free
+        llama_sampler_free.argtypes = [ctypes.c_void_p]
+        llama_sampler_free.restype = None
 
-    llama_sampler_init_logit_bias = llama.llama_sampler_init_logit_bias
-    llama_sampler_init_logit_bias.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(llama_logit_bias)]
-    llama_sampler_init_logit_bias.restype = ctypes.c_void_p
+        llama_sampler_init_logit_bias = llama.llama_sampler_init_logit_bias
+        llama_sampler_init_logit_bias.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(llama_logit_bias)]
+        llama_sampler_init_logit_bias.restype = ctypes.c_void_p
 
-    llama_sampler_init_min_p = llama.llama_sampler_init_min_p
-    llama_sampler_init_min_p.argtypes = [ctypes.c_float, ctypes.c_size_t]
-    llama_sampler_init_min_p.restype = ctypes.c_void_p
+        llama_sampler_init_min_p = llama.llama_sampler_init_min_p
+        llama_sampler_init_min_p.argtypes = [ctypes.c_float, ctypes.c_size_t]
+        llama_sampler_init_min_p.restype = ctypes.c_void_p
 
-    llama_sampler_init_penalties = llama.llama_sampler_init_penalties
-    llama_sampler_init_penalties.argtypes = [ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_float]
-    llama_sampler_init_penalties.restype = ctypes.c_void_p
+        llama_sampler_init_penalties = llama.llama_sampler_init_penalties
+        llama_sampler_init_penalties.argtypes = [ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_float]
+        llama_sampler_init_penalties.restype = ctypes.c_void_p
 
-    llama_sampler_accept = llama.llama_sampler_accept
-    llama_sampler_accept.argtypes = [ctypes.c_void_p, llama_token]
-    llama_sampler_accept.restype = None
+        llama_sampler_accept = llama.llama_sampler_accept
+        llama_sampler_accept.argtypes = [ctypes.c_void_p, llama_token]
+        llama_sampler_accept.restype = None
+    except AttributeError:
+        # 兼容旧版 llama.cpp
+        pass
 
 
 def load_model(model_path: str, n_gpu_layers: int = -1):
@@ -542,8 +551,8 @@ class LlamaContext:
         return llama_get_embeddings(self.ptr)
 
     def clear_kv_cache(self):
-        mem = llama_get_memory(self.ptr)
-        llama_memory_clear(mem, True)
+        cache = llama_get_kv_cache(self.ptr)
+        llama_kv_cache_clear(cache)
 
     def __del__(self):
         if hasattr(self, 'ptr') and self.ptr:

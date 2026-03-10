@@ -94,6 +94,12 @@ class ASREngineConfig:
     vulkan_enable: bool = True
     vulkan_device_id: int = 0
     vulkan_force_fp32: bool = False
+    
+    # 新增 GPU 选择策略字段
+    gpu_selection_mode: Optional[str] = None
+    perf_dml_keyword: str = "NVIDIA"
+    perf_vulkan_keyword: str = "NVIDIA"
+    save_dml_keyword: str = "Intel"
 
     def __post_init__(self):
         # 如果没有显式设置 Encoder 填充时长，则默认与 LLM 分段识别时长对齐

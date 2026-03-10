@@ -6,6 +6,7 @@ import codecs
 import dataclasses
 import numpy as np
 import multiprocessing as mp
+import subprocess
 from pathlib import Path
 from collections import deque
 from typing import Optional, List
@@ -14,6 +15,65 @@ from .schema import MsgType, StreamingMessage, DecodeResult, ASREngineConfig, Tr
 from .utils import normalize_language_name, validate_language
 from .encoder import QwenAudioEncoder
 from . import llama
+
+def find_vulkan_device_id(keyword: str) -> int:
+    """
+    通过关键词查找 Vulkan 物理设备 ID
+    """
+    try:
+        # 尝试使用 vulkaninfo --summary
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        cmd = "vulkaninfo --summary"
+        try:
+            output = subprocess.check_output(cmd, startupinfo=startupinfo, text=True)
+        except subprocess.CalledProcessError:
+            # 回退到完整输出
+            cmd = "vulkaninfo"
+            output = subprocess.check_output(cmd, startupinfo=startupinfo, text=True)
+            
+        print(f"--- [QwenASR] 正在搜索 Vulkan 设备 (关键词: '{keyword}') ---")
+        
+        current_id = -1
+        found_id = -1
+        
+        for line in output.splitlines():
+            line = line.strip()
+            # 匹配 "GPU0:" 格式
+            if line.startswith("GPU") and ":" in line: 
+                try:
+                    # 提取数字部分
+                    part = line.split(":")[0].replace("GPU", "")
+                    # 确保是纯数字
+                    if part.isdigit():
+                        current_id = int(part)
+                except:
+                    pass
+            
+            # 匹配设备名
+            if "deviceName" in line and "=" in line:
+                name = line.split("=", 1)[1].strip()
+                if current_id != -1:
+                    print(f"    - 发现设备 ID {current_id}: {name}")
+                    if keyword.lower() in name.lower():
+                        # 优先排除 Microsoft Wrapper (除非关键词指定)
+                        if "Microsoft" not in name or "Microsoft" in keyword:
+                            print(f"    √ 匹配成功: ID {current_id}")
+                            return current_id
+                        elif found_id == -1:
+                            found_id = current_id
+        
+        if found_id != -1:
+            print(f"    √ 使用次优匹配: ID {found_id}")
+            return found_id
+            
+        print(f"    ! 未找到包含 '{keyword}' 的 Vulkan 设备，回退到 ID 0")
+        return 0
+        
+    except Exception as e:
+        print(f"[Warning] 自动查找 Vulkan 设备失败: {e}，回退到 ID 0")
+        return 0
 
 @dataclasses.dataclass
 class ASRS_Segment:
@@ -29,6 +89,41 @@ class QwenASREngine:
     def __init__(self, config: ASREngineConfig):
         self.config = config
         self.verbose = config.verbose
+        
+        # ------------------------------------------------------------
+        # 智能设备选择策略 (Auto GPU Selection)
+        # ------------------------------------------------------------
+        if config.gpu_selection_mode:
+            from .encoder import find_dml_device_id
+            
+            mode = config.gpu_selection_mode.lower()
+            if mode == "performance":
+                # 性能模式：全独显
+                if self.verbose: print(f"--- [QwenASR] 激活性能模式 (Performance Mode) ---")
+                
+                # 1. Encoder -> 独显 (DML)
+                kw_dml = config.perf_dml_keyword
+                config.use_dml = True
+                config.dml_device_id = find_dml_device_id(kw_dml)
+                
+                # 2. Decoder -> 独显 (Vulkan)
+                kw_vk = config.perf_vulkan_keyword
+                config.vulkan_enable = True
+                config.vulkan_device_id = find_vulkan_device_id(kw_vk)
+                
+            elif mode == "saving":
+                # 节能/兼容模式：集显 + CPU
+                if self.verbose: print(f"--- [QwenASR] 激活节能/训练兼容模式 (Saving Mode) ---")
+                
+                # 1. Encoder -> 集显 (DML)
+                kw_dml = config.save_dml_keyword
+                config.use_dml = True
+                config.dml_device_id = find_dml_device_id(kw_dml)
+                
+                # 2. Decoder -> CPU (禁用 Vulkan)
+                if self.verbose: print(f"--- [QwenASR] Decoder 强制使用 CPU (禁用 Vulkan) ---")
+                config.vulkan_enable = False
+
         if self.verbose: print(f"--- [QwenASR] 初始化引擎 (DML: {config.use_dml}, Vulkan: {config.vulkan_enable}) ---")
 
         # 设置图形加速环境
@@ -68,8 +163,11 @@ class QwenASREngine:
         # 3. 加载识别 LLM
         # 如果是集显，内存紧张，可以尝试 n_gpu_layers=0 或较小值
         # 这里默认 -1 (全部 offload)
-        # 也许可以从 config 中读取 n_gpu_layers
-        self.model = llama.LlamaModel(llm_gguf, n_gpu_layers=-1)
+        n_gpu_layers = -1
+        if not config.vulkan_enable:
+             n_gpu_layers = 0
+             
+        self.model = llama.LlamaModel(llm_gguf, n_gpu_layers=n_gpu_layers)
         self.embedding_table = llama.get_token_embeddings_gguf(llm_gguf)
         self.ctx = llama.LlamaContext(self.model, n_ctx=config.n_ctx, n_batch=4096, embeddings=False)
 

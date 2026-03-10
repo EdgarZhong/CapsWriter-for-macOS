@@ -128,11 +128,24 @@ class Qwen3ASRGGUFArgs:
     encoder_backend_fn = ModelPaths.qwen3_asr_gguf_encoder_backend.name
     llm_fn = ModelPaths.qwen3_asr_gguf_llm_decode.name
 
-    # 显卡加速
-    use_dml = True              # 是否启用 DirectML 加速 ONNX 模型，实测 AMD 显卡上会慢，因此默认关闭，建议N卡开启
-    dml_device_id = 0           # DirectML 设备 ID，默认为 0（通常是独显）。若要使用集显，可尝试改为 1
-    vulkan_enable = False        # 是否启用 Vulkan 加速 GGUF 模型
-    vulkan_device_id = 1        # Vulkan 设备 ID，默认为 0（通常是独显）。若要使用集显，可尝试改为 1
+    # 显卡分工策略
+    # "performance": 极致性能模式（纯独显），Encoder(ONNX)->独显，Decoder(LLM)->独显 (延迟最低)
+    # "saving":      训练兼容模式（纯集显/CPU），Encoder(ONNX)->集显，Decoder(LLM)->CPU (完全不占用独显)
+    gpu_selection_mode = "saving"
+
+    # 设备关键词匹配（程序会自动根据关键词搜索对应的设备ID，解决ID漂移问题）
+    # 性能模式关键词
+    perf_dml_keyword = "NVIDIA"     # 性能模式下 Encoder 优先匹配的显卡名
+    perf_vulkan_keyword = "NVIDIA"  # 性能模式下 Decoder 优先匹配的显卡名
+    
+    # 节能模式关键词
+    save_dml_keyword = "Intel"      # 节能模式下 Encoder 优先匹配的显卡名 (如 Intel, AMD)
+
+    # --- 以下为传统手动配置 (当 gpu_selection_mode 为 None 时生效) ---
+    use_dml = True              # 是否启用 DirectML 加速 ONNX 模型
+    dml_device_id = 0           # DirectML 设备 ID
+    vulkan_enable = True        # 是否启用 Vulkan 加速 GGUF 模型
+    vulkan_device_id = 0        # Vulkan 设备 ID
     vulkan_force_fp32 = False   # 是否强制 FP32 计算（如果 GPU 是 Intel 集显且出现精度溢出，可设为 True）
     
     # 模型细节

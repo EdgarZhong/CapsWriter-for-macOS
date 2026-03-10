@@ -108,6 +108,10 @@ def create_asr_engine(
     vulkan_device_id: int = 0,
     vulkan_force_fp32: bool = False,
     verbose: bool = True,
+    gpu_selection_mode: Optional[str] = None,
+    perf_dml_keyword: str = "NVIDIA",
+    perf_vulkan_keyword: str = "NVIDIA",
+    save_dml_keyword: str = "Intel",
     **kwargs
 ) -> QwenASREngine:
     """创建并初始化 Qwen ASR 引擎的快捷入口"""
@@ -126,7 +130,11 @@ def create_asr_engine(
         vulkan_device_id=vulkan_device_id,
         vulkan_force_fp32=vulkan_force_fp32,
         verbose=verbose,
-        enable_aligner=False # 强制关闭对齐以符合需求
+        enable_aligner=False, # 强制关闭对齐以符合需求
+        gpu_selection_mode=gpu_selection_mode,
+        perf_dml_keyword=perf_dml_keyword,
+        perf_vulkan_keyword=perf_vulkan_keyword,
+        save_dml_keyword=save_dml_keyword
     )
 
     engine = QwenASREngine(config)
