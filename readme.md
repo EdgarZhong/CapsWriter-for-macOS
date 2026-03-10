@@ -9,6 +9,17 @@
 
 ## 🚀 更新说明：
 
+**Custom Fork 特性 (by EdgarZhong):**
+- **新增 GPU 智能分工模式**：支持 `performance` (全独显) 和 `saving` (集显+CPU) 两种策略，自动锚定物理设备。
+- **新增守护进程监控**：`caps_monitor.py` 自动管理 Server 和 Client，异常退出秒级拉起，确保服务永不宕机。
+- **命令行控制工具**：通过 `caps` 命令一键管理。
+  - `caps start`: 启动所有服务（含监控）。
+  - `caps stop`: 强制停止所有服务及关联进程。
+  - `caps mode performance`: 瞬间切换至全独显高性能模式。
+  - `caps mode saving`: 瞬间切换至集显节能模式。
+  - `caps status`: 实时查看各组件运行状态。
+- **Windows 一键部署**：提供 `setup.bat` 自动处理 Python 环境与依赖，并创建快捷入口。
+
 v2.5-alpha 新增：
 - **初步引入 [Qwen3-ASR-1.7B](https://github.com/HaujetZhao/Qwen3-ASR-GGUF) 模型支持，140ms 极速推理，准确率夯爆**
   - Qwen3-ASR-1.7B 只是初步引入，只支持语音输入，没有时间戳，无法转录文件
