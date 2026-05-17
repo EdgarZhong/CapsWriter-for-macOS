@@ -57,6 +57,7 @@ pytestdebug.log
 
 # Django 框架相关
 *.log
+*.swp
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -142,6 +143,9 @@ cython_debug/
 
 # VS Code 设置
 .vscode/
+
+# 本地归档目录
+.archive/
 
 # --- 本项目特定忽略 ---
 

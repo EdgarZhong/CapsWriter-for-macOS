@@ -1,129 +1,142 @@
-# CapsWriter-Offline (v2.5)
+# CapsWriter-Offline
 
-![demo](assets/demo.png)
+> 一个以“离线、低延迟、可高度自定义”为核心目标的语音输入项目。当前主代码基础最初面向 Windows 设计，`mac-dev` 分支正在推进 Apple Silicon 适配。
 
-> **按住 CapsLock 说话，松开就上屏。就这么简单。**
+## 项目基本信息
 
-**CapsWriter-Offline** 是一个专为 Windows 打造的**完全离线**语音输入工具。
+| 项目项 | 说明 |
+| --- | --- |
+| 项目定位 | 本地离线语音输入、文件转录与 LLM 辅助修正工具 |
+| 核心架构 | Client / Server 双进程架构；服务端负责推理，客户端负责录音、快捷键、上屏与 UI |
+| 主要能力 | 实时听写、文件转录、热词替换、规则替换、LLM 角色、托盘交互、日记归档、UDP 广播与控制 |
+| 当前稳定平台 | Windows 10/11 是现有稳定基线 |
+| 当前演进方向 | 在保留现有整体架构的前提下，为 Apple Silicon MacBook 引入 macOS 输入链路，并新增基于 MLX 的 `Qwen3-ASR` 专用后端 |
 
-## ✨ 核心特性
+## 架构概览
 
--   **语音输入**：按住 `CapsLock键` 或 `鼠标侧键X2` 说话，松开即输入，超低延迟，默认去除末尾逗句号。支持对讲机模式和单击录音模式。
--   **文件转录**：音视频文件往客户端 exe 一丢，字幕 (`.srt`)、文本 (`.txt`)、时间戳 (`.json`) 统统都有。
--   **数字 ITN**：自动将「十五六个」转为「15~16个」，支持各种复杂数字格式。
--   **热词替换**：在 `hot.txt` 记下偏僻词，通过音素模糊匹配，相似度大于阈值则强制替换。
--   **正则替换**：在 `hot-rule.txt` 用正则或简单等号规则，精准强制替换。
--   **LLM 角色**：预置了润色、小助理等角色，当识别结果的开头匹配任一角色名字时，将交由该角色处理。
--   **托盘菜单**：右键托盘图标即可添加热词、复制结果、清除LLM记忆。
--   **C/S 架构**：服务端与客户端分离，虽然 Win7 老电脑跑不了服务端模型，但最少能用客户端输入。
--   **日记归档**：按日期保存你的每一句语音及其识别结果。
--   **录音保存**：所有语音均保存为本地音频文件，隐私安全，永不丢失。
+- 服务端：`start_server.py` 启动 WebSocket 服务、模型加载、识别流水线与结果分发。
+- 客户端：`start_client.py` 启动快捷键监听、音频采集、结果后处理、文本注入、托盘与提示 UI。
+- 模型层：当前主力模型为 ONNX 编码器 + GGUF 解码器组合，也保留 Paraformer / SenseVoice / 标点模型 / 对齐器等引擎。
+- 配置层：根目录 `config_server.py`、`config_client.py`、`hot*.txt`、`LLM/*.py` 承担主要配置入口。
 
-**CapsWriter-Offline** 的精髓在于：**完全离线**（不受网络限制）、**响应极快**、**高准确率** 且 **高度自定义**。我追求的是一种「如臂使指」的流畅感，让它成为一个专属的一体化输入利器。无需安装，一个U盘就能带走，随插随用，保密电脑也能用。
+## 开发与测试环境
 
-以下为支持的模型：
+| 项目项 | 说明 |
+| --- | --- |
+| Python 版本约定 | 默认以 `mise` 管理的 Python 3.13 作为本地解释器 |
+| 依赖拆分 | 客户端依赖在 `requirements-client.txt`，服务端依赖在 `requirements-server.txt` |
+| 外部工具 | 文件转录依赖 `ffmpeg` 在 `PATH` 中可用 |
+| 模型目录 | 所有模型放在根目录 `models/` 下的既定子目录中 |
+| 当前注意事项 | 现有依赖和实现仍以 Windows 为主，macOS 适配进展请查看 `CLAUDE.md` |
 
-| 引擎名 | 准确性 | 速度 | 格式 | 显卡加速 |
-|------|-------|------|------|---------|
-| Paraformer | ★★★☆☆ | ★★★★★ | ONNX | ❌ |
-| SenseVoice-Small | ★★★☆☆ | ★★★★★ | ONNX | ✅ |
-| Fun-ASR-Nano | ★★★★☆ | ★★★★☆ | ONNX + GGUF | ✅ |
-| Qwen3-ASR | ★★★★★ | ★★★☆☆ | ONNX + GGUF | ✅ |
+## 稳定启动入口
 
+```bash
+python -m pip install -r requirements-server.txt
+python -m pip install -r requirements-client.txt
+python start_server.py
+python start_client.py
+```
 
-性能参考（20s 音频转录延迟）：
+## 项目目录结构
 
-| 模型 | CPU U9-285H | GPU RTX5050 |
-|------|------------|------------|
-| Paraformer | 0.6s | - |
-| SenseVoice-Small | 0.6s | 0.15s |
-| Fun-ASR-Nano | 2.0s | 0.5s |
-| Qwen3-ASR-1.7B | 4.0s | 1.0s |
+```text
+CapsWriter-Offline/
+├── AGENTS.md
+├── CLAUDE.md
+├── LICENSE
+├── assets/
+│   ├── BUILD_GUIDE.md
+│   ├── demo.png
+│   └── ...
+├── docs/
+│   ├── CHANGELOG.md
+│   ├── 环境依赖安装说明.md
+│   ├── 文件转录功能如何使用.md
+│   ├── 热词功能如何使用.md
+│   ├── 角色功能如何使用.md
+│   ├── 显卡加速的若干问题.md
+│   ├── 模型下载的若干问题.md
+│   ├── 识别语言如何配置.md
+│   └── text_merge_algorithm.md
+├── LLM/
+│   ├── default.py
+│   ├── 大助理.py
+│   ├── 小助理.py
+│   └── 翻译.py
+├── models/
+│   ├── Fun-ASR-Nano/
+│   ├── Paraformer/
+│   ├── Punct-CT-Transformer/
+│   ├── Qwen3-ASR/
+│   ├── Qwen3-ForcedAligner/
+│   └── SenseVoice-Small/
+├── core/
+│   ├── client/
+│   │   ├── audio/
+│   │   ├── clipboard/
+│   │   ├── connection/
+│   │   ├── hotword/
+│   │   ├── llm/
+│   │   ├── manager/
+│   │   ├── output/
+│   │   ├── shortcut/
+│   │   ├── transcribe/
+│   │   └── ui/
+│   ├── server/
+│   │   ├── connection/
+│   │   ├── engines/
+│   │   ├── formatter/
+│   │   ├── merger/
+│   │   └── worker/
+│   ├── tools/
+│   └── ui/
+├── config_client.py
+├── config_server.py
+├── hot-rule.txt
+├── hot-server.txt
+├── hot.txt
+├── requirements-client.txt
+├── requirements-server.txt
+├── start_client.py
+├── start_server.py
+└── readme.md
+```
 
-详细功能说明请参考 [`docs/`](docs/) 目录：
-- [环境依赖安装说明](docs/环境依赖安装说明.md) — VC++ 运行库、FFmpeg 安装
-- [热词功能如何使用](docs/热词功能如何使用.md) — 热词替换、规则替换、自定义短语
-- [角色功能如何使用](docs/角色功能如何使用.md) — LLM 角色配置、输出模式、创建新角色
-- [识别语言如何配置](docs/识别语言如何配置.md) — 各引擎语言支持范围与配置方法
-- [文件转录功能如何使用](docs/文件转录功能如何使用.md) — 拖拽转字幕、时间戳对齐
-- [显卡加速的若干问题](docs/显卡加速的若干问题.md) — DirectML、Vulkan 加速配置
-- [模型下载的若干问题](docs/模型下载的若干问题.md) — 引擎选择、模型下载、目录结构
-- [更新日志](docs/CHANGELOG.md) 
+## 重要文档索引表
 
+| 内容 | 文件路径 |
+| --- | --- |
+| 稳定项目入口、目录骨架、运行方式 | `readme.md` |
+| 协作规则、开发流程、文件安全策略 | `AGENTS.md` |
+| 当前阶段目标、任务看板、阶段决策 | `CLAUDE.md` |
+| 打包说明 | `assets/BUILD_GUIDE.md` |
+| 更新日志 | `docs/CHANGELOG.md` |
+| Qwen3-ASR macOS 专项规划与模型选型 | `docs/Qwen3-ASR_macOS_最小适配规划.md` |
+| 模型下载与目录说明 | `docs/模型下载的若干问题.md` |
+| 环境依赖安装 | `docs/环境依赖安装说明.md` |
+| 识别语言配置 | `docs/识别语言如何配置.md` |
+| 文件转录说明 | `docs/文件转录功能如何使用.md` |
+| 热词系统说明 | `docs/热词功能如何使用.md` |
+| LLM 角色说明 | `docs/角色功能如何使用.md` |
+| 文本拼接算法说明 | `docs/text_merge_algorithm.md` |
+| 显卡加速问题说明 | `docs/显卡加速的若干问题.md` |
 
-## 💻 平台支持
+## 关键代码入口
 
-目前**仅能保证在 Windows 10/11 (64位) 下完美运行**。
+| 区域 | 入口 |
+| --- | --- |
+| 服务端启动 | `start_server.py` |
+| 客户端启动 | `start_client.py` |
+| 服务端门面 | `core/server/app.py` |
+| 客户端门面 | `core/client/app.py` |
+| 模型加载 | `core/server/worker/model_loader.py` |
+| 识别引擎工厂 | `core/server/engines/factory.py` |
+| 快捷键系统 | `core/client/shortcut/` |
+| 结果输出 | `core/client/output/` |
 
-- **Linux**：暂无环境进行测试和打包，无法保证兼容性。
-- **MacOS**：由于底层的 `keyboard` 库已放弃支持 MacOS，且系统限制极多，暂时无法支持。
+## 代码规范与开发测试闭环入口
 
-[LazyTyper](https://lazytyper.com/) 和 [闪电说](https://shandianshuo.cn/) 也是很优秀的作品，都有离线引擎，都支持 Windows Linux 与 MacOS，并都有漂亮的图形化页面，推荐使用。
-
-CapsWriter 的特别之处在于追求：
-
-- 无感输入
-- 完全离线，不受网络约束
-- 低延迟，尽量做到硬件极限的最快速度
-- 高度自定义的热词系统
-
-
-## 🎬 快速开始
-
-1.  **准备环境**：确保安装了 [VC++ 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。若要使用文件转录功能，还需安装 [ffmpeg](https://ffmpeg.org/download.html) 并确保其在系统 PATH 中。
-2.  **下载解压**：下载 [Latest Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/latest) 里的软件本体，再到 [Models Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models) 下载模型压缩包，将模型解压，放入 `models` 文件夹中对应模型的文件夹里。
-3.  **启动服务**：双击 `start_server.exe`，**它会自动最小化到托盘菜单**。
-4.  **启动听写**：双击 `start_client.exe`，**它会自动最小化到托盘菜单**。
-5.  **开始录音**：按住 `CapsLock键` 或 `鼠标侧键X2` 就可以说话了！
-
-
-## ⚙️ 个性化配置
-
-所有的设置都在根目录的 `config_server.py` 和 `config_client.py` 里，可直接编辑。
-
-
-## 🛠️ 常见问题
-
-
-**Q: 为什么按了没反应？**  
-A: 请确认 `start_client.exe` 的黑窗口还在运行。若想在管理员权限运行的程序中输入，也需以管理员权限运行客户端。
-
-**Q: 为什么识别结果没字？**  
-A: 到 `年/月/assets` 文件夹中检查录音文件，看是不是没有录到音；听听录音效果，是不是麦克风太差，建议使用桌面 USB 麦克风；检查麦克风权限。
-
-**Q: 想要隐藏黑窗口？**  
-A: 点击托盘菜单即可隐藏黑窗口。
-
-**Q: 如何开机启动？**  
-A: `Win+R` 输入 `shell:startup` 打开启动文件夹，将服务端、客户端的快捷方式放进去即可。
-
-
-## 🚀 我的其他优质项目推荐
-
-| 项目名称 | 说明 | 体验地址 |
-| :--- | :--- | :--- |
-| [**IME_Indicator**](https://github.com/HaujetZhao/IME_Indicator) | Windows 输入法中英状态指示器 | [下载即用](https://github.com/HaujetZhao/IME_Indicator/releases/latest/download/IME-Indicator.exe) |
-| [**Rust-Tray**](https://github.com/HaujetZhao/Rust-Tray) | 将控制台最小化到托盘图标的工具 | [下载即用](https://github.com/HaujetZhao/Rust-Tray/releases/latest/download/Tray.exe) |
-| [**Gallery-Viewer**](https://github.com/HaujetZhao/Gallery-Viewer-HTML) | 网页端图库查看器，纯 HTML 实现 | [点击即用](https://haujetzhao.github.io/Gallery-Viewer-HTML/) |
-| [**全景图片查看器**](https://github.com/HaujetZhao/Panorama-Viewer-HTML) | 单个网页实现全景照片、视频查看 | [点击即用](https://haujetzhao.github.io/Panorama-Viewer-HTML/) |
-| [**图标生成器**](https://github.com/HaujetZhao/Font-Awesome-Icon-Generator-HTML) | 使用 Font-Awesome 生成网站 Icon | [点击即用](https://haujetzhao.github.io/Font-Awesome-Icon-Generator-HTML/) |
-| [**五笔编码反查**](https://github.com/HaujetZhao/wubi86-revert-query) | 86 五笔编码在线反查 | [点击即用](https://haujetzhao.github.io/wubi86-revert-query/) |
-| [**快捷键映射图**](https://github.com/HaujetZhao/ShortcutMapper_Chinese) | 可视化、交互式的快捷键映射图 (中文版) | [点击即用](https://haujetzhao.github.io/ShortcutMapper_Chinese/) |
-
-
-## ❤️ 致谢
-
-本项目基于以下优秀的开源项目：
-
--   [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx)
--   [FunASR](https://github.com/alibaba-damo-academy/FunASR)
-
-感谢 Google Antigravity、Anthropic Claude、GLM、DeepSeek，如果不是这些编程助手，许多功能（例如基于音素的热词检索算法）我是无力实现的。
-
-特别感谢那些慷慨解囊的捐助者，你们的捐助让我用在了购买这些优质的 AI 编程助手服务，并最终将这些成果反馈到了软件的更新里。
-
-
-如果觉得好用，欢迎点个 Star 或者打赏支持：
-
-
-![sponsor](assets/sponsor.jpg)	
+- 通用协作规则、代码规范、文件安全要求：见 `AGENTS.md`
+- 当前阶段任务、风险、技术路线：见 `CLAUDE.md`
+- 稳定的专项说明、算法说明、使用说明：见 `docs/`
