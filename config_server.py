@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 # 版本信息
@@ -13,8 +14,11 @@ class ServerConfig:
     addr = '0.0.0.0'
     port = '6016'
 
-    # 语音模型选择：'qwen_asr', 'fun_asr_nano', 'sensevoice', 'paraformer'
-    model_type = 'qwen_asr'
+    # 语音模型选择：
+    # - Windows 继续沿用现有 qwen_asr(=GGUF) 路线，避免影响当前稳定基线。
+    # - macOS 默认切到 qwen_asr_mlx，优先服务 Apple Silicon 的常驻低功耗场景。
+    # - 仍保留 sensevoice / paraformer / fun_asr_nano 的显式配置入口，避免破坏现有兼容性。
+    model_type = 'qwen_asr_mlx' if sys.platform == 'darwin' else 'qwen_asr'
 
     format_num = True       # 输出时是否将中文数字转为阿拉伯数字
     format_spell = True     # 输出时是否调整中英之间的空格
@@ -74,11 +78,39 @@ class ModelPaths:
     qwen3_asr_gguf_encoder_backend = qwen3_asr_gguf_dir / 'qwen3_asr_encoder_backend.onnx'
     qwen3_asr_gguf_llm_decode = qwen3_asr_gguf_dir / 'qwen3_asr_llm.gguf'
 
+    # macOS / MLX 路线的本地模型目录约定。
+    # 当前已根据用户新口径切换为“默认优先 8bit，本地缺失时再降级到 4bit”。
+    # 这样做有两个目的：
+    # 1. 在本机已准备好 8bit 权重时，直接命中更高质量的默认规格。
+    # 2. 在 8bit 尚未就绪时，仍保留 4bit 和远端仓库作为启动兜底，避免本地开发被卡死。
+    qwen3_asr_mlx_8bit_dir = model_dir / 'Qwen3-ASR-MLX' / 'Qwen3-ASR-1.7B-8bit'
+    qwen3_asr_mlx_4bit_dir = model_dir / 'Qwen3-ASR-MLX' / 'Qwen3-ASR-1.7B-4bit'
+
     # Force-Aligner 模型路径
     force_aligner_gguf_dir = model_dir / 'Qwen3-ForcedAligner' / 'Qwen3-ForcedAligner-0.6B'
     force_aligner_gguf_encoder_frontend = force_aligner_gguf_dir / 'qwen3_aligner_encoder_frontend.int4.onnx'
     force_aligner_gguf_encoder_backend = force_aligner_gguf_dir / 'qwen3_aligner_encoder_backend.int4.onnx'
     force_aligner_gguf_llm_decode = force_aligner_gguf_dir / 'qwen3_aligner_llm.q5_k.gguf'
+
+    @staticmethod
+    def resolve_qwen3_asr_mlx_model() -> str:
+        """
+        解析 MLX 模型入口。
+
+        设计意图：
+        1. 默认优先使用本地 8bit 目录，匹配当前已确认的新默认规格。
+        2. 若 8bit 缺失，则自动回退到本地 4bit，保证项目仍可离线启动。
+        3. 若本地目录都未准备好，再回退到社区 4bit 仓库 ID，方便冷启动联调。
+        4. 只把“目录非空”视为本地模型可用，避免把空目录误判成有效模型。
+        """
+        local_candidates = [
+            ModelPaths.qwen3_asr_mlx_8bit_dir,
+            ModelPaths.qwen3_asr_mlx_4bit_dir,
+        ]
+        for local_dir in local_candidates:
+            if local_dir.exists() and any(local_dir.iterdir()):
+                return local_dir.as_posix()
+        return 'mlx-community/Qwen3-ASR-1.7B-4bit'
 
 
 
@@ -151,6 +183,25 @@ class Qwen3ASRGGUFArgs:
     verbose = False
 
 
+class Qwen3ASRMLXArgs:
+    """Qwen3-ASR-MLX 模型参数配置"""
+
+    # 模型入口既支持本地目录，也支持 Hugging Face 仓库 ID。
+    # 当前默认规格已经切到 1.7B-8bit，但仍保留 4bit 作为本地和远端回退选项。
+    # 这样可以在不破坏启动稳健性的前提下，优先使用用户已经准备好的 8bit 权重。
+    model = ModelPaths.resolve_qwen3_asr_mlx_model()
+
+    # 返回时间戳会触发上游 forced aligner 流程，首版为了优先跑通最终结果闭环先关闭。
+    # 文件转录如需更精确时间戳，后续可再按阶段单独启用和验证。
+    return_timestamps = False
+
+    # 先让上游库按音频长度自动推导生成长度，避免在首版把 token 上限调参写死。
+    max_new_tokens = None
+
+    # 首版不接 speculative decoding / draft model，先保留最小调用面。
+    verbose = False
+
+
 class ForceAlignerGGUFArgs:
     """Force-Aligner-GGUF 模型参数配置"""
 
@@ -167,4 +218,3 @@ class ForceAlignerGGUFArgs:
     # 对齐细节
     n_ctx = 3072                # 上下文窗口大小
     dml_pad_to = 30             # 开启 DirectML 加速时，短音频统一填充到指定长度，有加速效果
-

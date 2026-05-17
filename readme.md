@@ -23,7 +23,7 @@
 
 | 项目项 | 说明 |
 | --- | --- |
-| Python 版本约定 | 默认以 `mise` 管理的 Python 3.13 作为本地解释器 |
+| Python 版本约定 | 默认以 `mise` 管理的 Python 3.13 作为本地解释器；进入本仓库后使用项目级 `uv` 虚拟环境 |
 | 依赖拆分 | 客户端依赖在 `requirements-client.txt`，服务端依赖在 `requirements-server.txt` |
 | 外部工具 | 文件转录依赖 `ffmpeg` 在 `PATH` 中可用 |
 | 模型目录 | 所有模型放在根目录 `models/` 下的既定子目录中 |
@@ -32,10 +32,12 @@
 ## 稳定启动入口
 
 ```bash
-python -m pip install -r requirements-server.txt
-python -m pip install -r requirements-client.txt
-python start_server.py
-python start_client.py
+uv python pin 3.13
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -r requirements-server.txt
+uv pip install --python .venv/bin/python -r requirements-client.txt
+.venv/bin/python start_server.py
+.venv/bin/python start_client.py
 ```
 
 ## 项目目录结构
