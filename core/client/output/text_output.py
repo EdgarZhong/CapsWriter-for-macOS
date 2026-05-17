@@ -7,16 +7,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import platform
 from typing import Optional
 import re
 
-import keyboard
-import pyclip
-from pynput import keyboard as pynput_keyboard
-
 from config_client import ClientConfig as Config
+from core.client.clipboard.clipboard import paste_text
 from . import logger
 
 
@@ -60,6 +56,12 @@ class TextOutput:
         # 确定输出方式
         if paste is None:
             paste = Config.paste
+
+        # macOS 下优先使用剪贴板粘贴。
+        # 原实现依赖 `keyboard.write`，该库在 macOS 上不稳定，且对中文输入法兼容性差。
+        # 为了保证“识别完成即可可靠上屏”，这里强制走更稳的粘贴链路。
+        if platform.system() == 'Darwin':
+            paste = True
         
         if paste:
             await self._paste_text(text)
@@ -74,34 +76,7 @@ class TextOutput:
             text: 要粘贴的文本
         """
         logger.debug(f"使用粘贴方式输出文本，长度: {len(text)}")
-        
-        # 保存剪贴板
-        try:
-            temp = pyclip.paste().decode('utf-8')
-        except Exception:
-            temp = ''
-        
-        # 复制结果
-        pyclip.copy(text)
-        
-        # 粘贴结果（使用 pynput 模拟 Ctrl+V）
-        controller = pynput_keyboard.Controller()
-        if platform.system() == 'Darwin':
-            # macOS: Command+V
-            with controller.pressed(pynput_keyboard.Key.cmd):
-                controller.tap('v')
-        else:
-            # Windows/Linux: Ctrl+V
-            with controller.pressed(pynput_keyboard.Key.ctrl):
-                controller.tap('v')
-        
-        logger.debug("已发送粘贴命令 (Ctrl+V)")
-        
-        # 还原剪贴板
-        if Config.restore_clip:
-            await asyncio.sleep(0.1)
-            pyclip.copy(temp)
-            logger.debug("剪贴板已恢复")
+        await paste_text(text, restore_clipboard=Config.restore_clip)
     
     def _type_text(self, text: str) -> None:
         """
@@ -114,4 +89,9 @@ class TextOutput:
             text: 要输出的文本
         """
         logger.debug(f"使用打字方式输出文本，长度: {len(text)}")
+
+        # 非 macOS 平台继续保留原有 `keyboard.write` 行为。
+        # 这里改为局部导入，避免在 macOS 上因为导入 `keyboard` 产生副作用。
+        import keyboard
+
         keyboard.write(text)

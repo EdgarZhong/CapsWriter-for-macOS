@@ -25,6 +25,14 @@
 - 已完成：真实音频输入闭环验证已通过，`/Users/edgar/Music/测试音频.m4a` 已成功完成“音频解码 -> 模型加载 -> 最终文本输出”。
 - 已发现并修复：`qwen_asr_mlx` 遇到非 `16kHz` 音频时会隐式依赖 `ffmpeg` 做重采样，现已在引擎层补齐本地重采样兜底。
 - 已发现：客户端在 macOS 首次真实启动时即阻塞于 `core/client/shortcut/key_mapper.py` 对 `pynput._util.win32.KeyTranslator` 的直接导入，尚未进入热键监听与录音链路。
+- 已完成：本机 `ffmpeg` 已通过 Homebrew 安装，版本为 `8.1.1`，后续媒体转码和外部依赖路径不再受缺失二进制阻塞。
+- 已完成：客户端快捷键层已新增 macOS 分支，`Caps Lock` 不再走 Win32 `win32_event_filter`，改为使用 Quartz / `pynput darwin_intercept` 处理底层 `flagsChanged` 事件。
+- 已完成：`Caps Lock` 的 macOS 路径已按“按下开始录音、松开结束录音、短按补发原键、长按不切换大小写锁定”接入现有任务状态机。
+- 已完成：为降低 macOS 启动期副作用，`core/client/__init__.py`、`core/client/shortcut/__init__.py`、`core/client/output/__init__.py`、`core/client/llm/__init__.py` 已改为惰性导出，避免导入局部模块时提前拉起整套运行栈。
+- 已完成：客户端输出链路已补齐 macOS 分支，文本输出默认改为剪贴板粘贴，读取选区改为发送 `Command+C`。
+- 已确认失败：在用户真实桌面环境中，`Caps Lock` 无论长按还是短按，行为都与系统默认一致，既不会唤起录音，也不会改变顶部菜单栏的麦克风指示状态，松手后仍会触发大小写锁定切换。
+- 已确认失败：用户已在非微信窗口（`TextEdit`）以及 `ABC` / 拼音输入法下重复测试，现象完全一致，因此当前问题已排除“微信前台接管”和“输入法切换映射”这两个方向。
+- 已确认失败：当前基于 `pynput` / `darwin_intercept` 的 macOS `Caps Lock` 接管方案，在真实环境中不能稳定进入项目的热键状态机，不能作为继续迭代的可靠基础。
 
 ## 当前技术判断
 
@@ -91,7 +99,7 @@
 | 设计 `qwen_asr_mlx` 适配层 | 已完成 | 已对齐 `BaseASREngine`，采用 `mlx_qwen3_asr.Session` 薄适配 |
 | 服务端最小接入实现 | 已完成 | 已通过真实启动与真实音频闭环验证，非 `16kHz` 输入的重采样兜底也已补齐 |
 | 首版结果模式收敛 | 已完成 | 首版只要求松开后快速返回最终结果，不要求中间流式显示 |
-| 实现 macOS 客户端输入链路 | 进行中 | 真实启动已暴露首个阻断点：`key_mapper.py` 直接依赖 `pynput._util.win32` |
+| 实现 macOS 客户端输入链路 | 进行中 | 权限已打通，但当前 `pynput` 路线在真实环境中仍无法可靠接管 `Caps Lock`，需要切换到更底层的 macOS 原生事件 tap 专用实现 |
 | 更新稳定文档入口 | 已完成 | `readme.md` 已同步项目级 `uv` 环境与稳定启动方式 |
 
 ## 风险与前置条件
@@ -99,6 +107,9 @@
 - macOS 端要稳定监听按键、注入文本、读取选中文本，通常需要“辅助功能”“输入监控”“麦克风”等系统权限。
 - 社区提供的 MLX 权重可直接获取，但仍需验证其与 CapsWriter 结果格式、时间戳与流式模式的对齐成本。
 - 若后续发现 `mlx-qwen3-asr` 的 Python API 与当前引擎抽象差异较大，仍需写一层适配代码，而不是直接替换一两个函数。
+- 当前客户端冷启动虽然已不再卡在 Win32 导入点，但如果 Codex / 终端进程未被加入 macOS 辅助功能白名单，系统级键盘监听仍无法真实生效。
+- 启动日志中仍存在既有 `watchdog` 的 `FSEventsEmitter` 重复 watch 警告，该问题不属于本轮 `Caps Lock` 接管修复，但后续可能影响 LLM 目录热更新体验。
+- 当前最大的技术风险已经收敛为：`Caps Lock` 在 macOS 上不能继续依赖 `pynput` 通用监听抽象，需要直接上更底层的 Quartz / 原生事件 tap 专用实现，否则无法保证“长按录音、松手结束、且不切换大小写”的交互目标。
 
 ## 本轮验证
 
@@ -113,6 +124,21 @@
 - 已完成：真实音频 `/Users/edgar/Music/测试音频.m4a` 验证，最终识别结果为“现在开始录音。本音频用作千问三ASR Caps Writer后端MLX框架跑通的验证测试。”
 - 已完成：修复 `core/server/engines/qwen_asr_mlx/asr_engine.py`，对非 `16kHz` 音频在引擎层先做本地线性重采样，避免上游库因缺少 `ffmpeg` 而报错。
 - 已完成：真实客户端启动验证，当前阻断点已定位为 `pynput._util.win32.KeyTranslator` 的 macOS 导入失败。
+- 已完成：`python -m py_compile` 通过，`key_mapper.py`、`shortcut_manager.py`、`text_output.py`、`llm_get_selection.py` 语法正常。
+- 已完成：局部导入验证通过，`core.client.shortcut.key_mapper`、`core.client.shortcut.shortcut_manager`、`core.client.output.text_output`、`core.client.llm.llm_get_selection` 均可独立导入，不再触发整套客户端提前初始化。
+- 已完成：`Caps Lock` 的 macOS 状态机单元级验证通过，重复按下/释放不会产生重复事件，逻辑分发表现符合预期。
+- 已完成：真实客户端冷启动验证通过，程序已进入麦克风模式初始化、热词/LLM 启动与 WebSocket 连接阶段，不再卡死在早期导入。
+- 已确认：真实冷启动环境中仍提示 “This process is not trusted! Input event monitoring will not be possible until it is added to accessibility clients.”，因此本轮尚未在已授权环境下完成真实按键录音闭环。
+- 已完成：用户已为 Codex 开启“辅助功能 / 输入监控 / 麦克风”三项权限；重新启动后 `not trusted` 日志消失，权限问题不再是主阻塞。
+- 已完成：真实桌面测试中，用户多次长按/短按 `Caps Lock`，客户端日志没有稳定出现对应录音启动链路，且系统默认大小写锁定行为未被改变。
+- 已完成：独立 `pynput` 简化探针曾捕获到 `Caps Lock` 的 `Key.caps_lock` 与 `flagsChanged` 事件，但项目内 `ShortcutManager` 对照探针未能稳定收到同类回调，说明当前项目接法与简化探针之间存在关键差异。
+- 已完成：更底层的原始 Quartz HID tap 探针尝试尚未形成稳定结论，当前最可靠的阶段性判断是“不要继续围绕 `pynput` 路线补丁式修修补补”。
+
+## 新会话交接
+
+- 当前最重要的结论：不要再继续把 macOS `Caps Lock` 接管建立在 `pynput` 的通用监听抽象上。
+- 下一步推荐路线：保留 Windows 逻辑不动，macOS 下把 `Caps Lock` 从通用 `ShortcutManager` 里拆出，改为独立原生事件 tap 模块，只把“按下开始录音 / 松开结束录音 / 维持原锁定状态”桥接回现有录音任务链路。
+- 继续排查时，应优先对比“最小可工作的原生 tap 示例”和“项目内 manager 接法”之间的差异，而不是继续让用户重复做盲测。
 
 ## 单 Agent 编排
 

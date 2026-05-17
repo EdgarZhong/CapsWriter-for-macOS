@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import asyncio
+import platform
 import time
 from threading import Event
 from typing import TYPE_CHECKING, Optional
@@ -125,9 +126,16 @@ class ShortcutTask:
             self.app.loop
         )
 
-        # 执行 restore（可恢复按键 + 非阻塞模式）
-        # 阻塞模式下按键不会发送到系统，状态不会改变，不需要恢复
-        if self.shortcut.is_toggle_key() and not self.shortcut.suppress:
+        # 执行 restore（可恢复按键）
+        #
+        # Windows 下原设计是假设 `suppress=True` 时系统收不到该按键，因此无需恢复。
+        # 但 macOS 上 `Caps Lock` 即使被监听到，系统层的锁定切换也不一定会被完全压住，
+        # 从真实测试看，长按录音结束后仍可能把大小写锁定留在错误状态。
+        # 因此在 macOS 下，对这类切换键无论是否 suppress，都统一补一次恢复，
+        # 以保证“长按说话后最终不要留下 Caps Lock 被切换”的交互结果。
+        if self.shortcut.is_toggle_key() and (
+            not self.shortcut.suppress or platform.system() == 'Darwin'
+        ):
             self._restore_key()
 
     def _restore_key(self) -> None:

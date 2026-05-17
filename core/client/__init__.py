@@ -23,10 +23,21 @@ from core.logger import get_logger, setup_logger
 setup_logger('client', level=Config.log_level)
 logger = get_logger('client')
 
-# 门面类
-from core.client.app import CapsWriterClient
+def __getattr__(name):
+    """
+    惰性导出客户端门面类。
+
+    旧实现会在导入 `core.client` 时立即导入 `app.py`，导致只想访问
+    `core.client.shortcut.*` 这类子模块时，也会把托盘、音频、快捷键等整套
+    运行期依赖提前拉起。改成惰性导出后，仅在真正访问 `CapsWriterClient`
+    时才导入门面类。
+    """
+    if name == 'CapsWriterClient':
+        from core.client.app import CapsWriterClient
+        return CapsWriterClient
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     'CapsWriterClient',
 ]
-

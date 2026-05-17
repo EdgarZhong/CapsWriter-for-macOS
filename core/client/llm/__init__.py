@@ -6,33 +6,69 @@ LLM 模块
 from core import get_logger
 logger = get_logger('client')
 
-# 核心处理器
-from .llm_handler import LLMHandler, LLMResult
+def __getattr__(name):
+    """
+    惰性导出 LLM 子模块对象。
 
-# 角色配置和加载
-from .llm_role_config import RoleConfig
-from .llm_role_loader import RoleLoader
+    这个包原本会在导入阶段立刻加载角色、输出、监控、剪贴板等全部子模块。
+    在 macOS 客户端调试阶段，这会把大量与当前任务无关的运行期依赖提前执行。
+    改为惰性导出后，只有真正访问某个对象时才导入对应模块。
+    """
+    if name in ('LLMHandler', 'LLMResult'):
+        from .llm_handler import LLMHandler, LLMResult
+        return {
+            'LLMHandler': LLMHandler,
+            'LLMResult': LLMResult,
+        }[name]
 
-# 上下文管理
-from .llm_context import ContextManager
+    if name == 'RoleConfig':
+        from .llm_role_config import RoleConfig
+        return RoleConfig
 
-# 消息构建和客户端池
-from .llm_message_builder import MessageBuilder
-from .llm_client_pool import ClientPool
+    if name == 'RoleLoader':
+        from .llm_role_loader import RoleLoader
+        return RoleLoader
 
-# 剪贴板/选中文字
-from .llm_clipboard import copy_to_clipboard
-from .llm_get_selection import (
-    get_selected_text,
-    record_selection_usage
-)
+    if name == 'ContextManager':
+        from .llm_context import ContextManager
+        return ContextManager
 
-# 监控和输出
-from .llm_watcher import LLMFileWatcher
-from .llm_stop_monitor import StopMonitor
+    if name == 'MessageBuilder':
+        from .llm_message_builder import MessageBuilder
+        return MessageBuilder
 
-from .llm_output_toast import handle_toast_mode
-from .llm_output_typing import handle_typing_mode
+    if name == 'ClientPool':
+        from .llm_client_pool import ClientPool
+        return ClientPool
+
+    if name == 'copy_to_clipboard':
+        from .llm_clipboard import copy_to_clipboard
+        return copy_to_clipboard
+
+    if name in ('get_selected_text', 'record_selection_usage'):
+        from .llm_get_selection import get_selected_text, record_selection_usage
+        return {
+            'get_selected_text': get_selected_text,
+            'record_selection_usage': record_selection_usage,
+        }[name]
+
+    if name == 'LLMFileWatcher':
+        from .llm_watcher import LLMFileWatcher
+        return LLMFileWatcher
+
+    if name == 'StopMonitor':
+        from .llm_stop_monitor import StopMonitor
+        return StopMonitor
+
+    if name == 'handle_toast_mode':
+        from .llm_output_toast import handle_toast_mode
+        return handle_toast_mode
+
+    if name == 'handle_typing_mode':
+        from .llm_output_typing import handle_typing_mode
+        return handle_typing_mode
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

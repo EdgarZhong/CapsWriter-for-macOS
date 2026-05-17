@@ -5,15 +5,25 @@
 处理按键名称和虚拟键码之间的转换，以及相关常量定义
 """
 
+import platform
+
 from pynput import keyboard
-from pynput._util.win32 import KeyTranslator
 from . import logger
 
+SYSTEM_NAME = platform.system()
 
-# 创建键盘翻译器实例（用于 VK 到字符的转换）
-_key_translator = KeyTranslator()
+# `KeyTranslator` 只存在于 Windows 后端。
+# macOS 启动时如果无条件导入，会在模块导入阶段直接失败，
+# 导致客户端甚至还没进入快捷键监听逻辑就崩掉。
+if SYSTEM_NAME == 'Windows':
+    from pynput._util.win32 import KeyTranslator
+    _key_translator = KeyTranslator()
+else:
+    KeyTranslator = None
+    _key_translator = None
 
-# 特殊键 VK 映射（从 pynput 复制）
+# 特殊键 VK 映射。
+# 这里保留 `pynput.Key` 自带的虚拟键码映射，用于功能键、控制键等特殊按键。
 _SPECIAL_KEYS = {
     key.value.vk: key
     for key in keyboard.Key
@@ -105,13 +115,16 @@ class KeyMapper:
         if vk in NUMPAD_KEYS:
             return NUMPAD_KEYS[vk]
 
-        # 使用 pynput 的 KeyTranslator 获取字符（字母、数字、符号键）
-        try:
-            params = _key_translator(vk, is_press=True)
-            if 'char' in params and params['char'] is not None:
-                return params['char']
-        except Exception:
-            pass
+        # 在 Windows 上继续沿用 `KeyTranslator` 还原字符键。
+        # macOS 不再走这里的虚拟键码翻译；macOS 的键盘事件改为直接使用
+        # `pynput`/Quartz 上报的 `Key`/`KeyCode` 对象，不依赖 Win32 风格的 VK 翻译。
+        if _key_translator is not None:
+            try:
+                params = _key_translator(vk, is_press=True)
+                if 'char' in params and params['char'] is not None:
+                    return params['char']
+            except Exception:
+                pass
 
         # 未知键码，返回 vk_ 格式
         return f'vk_{vk}'
