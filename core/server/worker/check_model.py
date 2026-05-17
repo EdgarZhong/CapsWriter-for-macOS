@@ -63,6 +63,21 @@ def check_model() -> None:
                 ModelPaths.qwen3_asr_gguf_llm_decode,
             ]
         }
+    elif model_type == 'qwen_asr_mlx':
+        # MLX 路线的模型入口既可能是本地目录，也可能是远端 Hugging Face 仓库 ID。
+        # 因此这里不能像 GGUF/ONNX 一样逐文件检查，而是要按“解析后的入口类型”分支处理：
+        # 1. 若解析结果是本地目录，则检查目录存在且非空，避免把空目录误判成有效模型。
+        # 2. 若解析结果不是本地目录格式，则视为远端仓库 ID，启动阶段允许继续，由上游库负责拉取/加载。
+        resolved_model = ModelPaths.resolve_qwen3_asr_mlx_model()
+        resolved_model_path = Path(resolved_model)
+        if resolved_model_path.exists():
+            required_files = {
+                'Qwen-ASR-MLX 本地模型目录': [
+                    resolved_model_path,
+                ]
+            }
+        else:
+            required_files = {}
     else:
         error_msg = f"不支持的模型类型: {Config.model_type}"
         logger.error(error_msg)
@@ -74,6 +89,7 @@ def check_model() -> None:
     - 'sensevoice'
     - 'paraformer'
     - 'qwen_asr'
+    - 'qwen_asr_mlx'
 
         ''', style='bright_red')
         input('按回车退出')
@@ -83,9 +99,14 @@ def check_model() -> None:
     missing_files = []
     for category, files in required_files.items():
         for file_path in files:
+            # MLX 本地模型以目录为单位管理，所以除了存在性之外还要额外检查目录非空。
+            # 这样可以把“目录名存在但权重未下载完成”的情况提前拦截出来。
             if not file_path.exists():
                 missing_files.append((category, file_path))
                 logger.warning(f"模型文件缺失: {file_path}")
+            elif file_path.is_dir() and not any(file_path.iterdir()):
+                missing_files.append((category, file_path))
+                logger.warning(f"模型目录为空: {file_path}")
 
     # 如果有缺失的文件，显示错误信息并提供下载链接
     if missing_files:

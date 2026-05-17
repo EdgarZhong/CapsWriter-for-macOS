@@ -18,6 +18,8 @@ import numpy as np
 from ..base import BaseASREngine, RecognitionStream, EngineCapabilities
 from ..language import get_language, ENGINE_QWEN_ASR
 
+QWEN3_ASR_SAMPLE_RATE = 16000
+
 
 @dataclass
 class ASREngineConfig:
@@ -53,7 +55,9 @@ class QwenASRMLXStream(RecognitionStream):
         """
         接收一段音频。
 
-        这里统一转成 float32 单声道 numpy，避免把上游库依赖泄露到 TaskPipeline。
+        这里统一转成 float32 numpy，避免把上游库依赖泄露到 TaskPipeline。
+        采样率是否需要重采样放到 decode 阶段统一处理，这样可以把“输入标准化”和
+        “模型目标采样率适配”两件事分开，后续排查也更直观。
         """
         self.sample_rate = sample_rate
         self.audio_data = np.asarray(audio, dtype=np.float32)
@@ -134,10 +138,19 @@ class QwenASRMLXEngine(BaseASREngine):
         )
         max_new_tokens = kwargs.get('max_new_tokens', self.config.max_new_tokens)
         verbose = bool(kwargs.get('verbose', self.config.verbose))
+        prepared_audio, prepared_sample_rate = self._prepare_audio_for_session(
+            stream.audio_data,
+            stream.sample_rate,
+        )
 
         transcription = self.session.transcribe(
-            # 传 tuple 而不是裸 ndarray，确保上游明确知道当前采样率。
-            (stream.audio_data, stream.sample_rate),
+            # 这里始终把音频整理成 16kHz 后再透传给上游 Session。
+            # 设计意图：
+            # 1. Qwen3-ASR 的目标采样率就是 16kHz，本地先重采样不会改变主链路语义。
+            # 2. `mlx-qwen3-asr` 遇到非 16kHz 音频时会尝试调用 ffmpeg 重采样；
+            #    当前项目并未把 ffmpeg 设为服务端硬依赖，因此这里要主动兜底。
+            # 3. 这样可以把“环境缺少 ffmpeg”从运行时阻断，降级为引擎内部的透明处理。
+            (prepared_audio, prepared_sample_rate),
             context=context or "",
             language=mapped_lang,
             return_timestamps=return_timestamps,
@@ -231,3 +244,55 @@ class QwenASRMLXEngine(BaseASREngine):
         metal_clear_cache = getattr(metal, 'clear_cache', None)
         if callable(metal_clear_cache):
             metal_clear_cache()
+
+    @staticmethod
+    def _prepare_audio_for_session(
+        audio: np.ndarray,
+        sample_rate: int,
+    ) -> tuple[np.ndarray, int]:
+        """
+        将输入音频整理为上游 Session 最稳妥的 16kHz float32 形态。
+
+        这里显式在本地完成重采样，而不是把责任交给上游库去调用 ffmpeg，
+        目的是降低环境耦合，让服务端在未安装 ffmpeg 的 macOS 本机也能稳定工作。
+        """
+        normalized_audio = np.asarray(audio, dtype=np.float32)
+        if sample_rate == QWEN3_ASR_SAMPLE_RATE:
+            return normalized_audio, sample_rate
+        return (
+            QwenASRMLXEngine._resample_audio_linear(
+                normalized_audio,
+                sample_rate,
+                QWEN3_ASR_SAMPLE_RATE,
+            ),
+            QWEN3_ASR_SAMPLE_RATE,
+        )
+
+    @staticmethod
+    def _resample_audio_linear(
+        audio: np.ndarray,
+        source_sample_rate: int,
+        target_sample_rate: int,
+    ) -> np.ndarray:
+        """
+        使用线性插值做最小可用重采样。
+
+        这里不追求做成高保真音频处理器，只要求满足语音识别前置标准化：
+        - 算法简单、无额外依赖；
+        - 对短语音指令足够稳定；
+        - 能把“缺少 ffmpeg”从致命错误降为内部实现细节。
+        """
+        if audio.size == 0:
+            return audio.astype(np.float32, copy=False)
+        if source_sample_rate <= 0 or target_sample_rate <= 0:
+            raise ValueError(
+                f"非法采样率: source={source_sample_rate}, target={target_sample_rate}"
+            )
+
+        target_size = int(round(audio.size * target_sample_rate / source_sample_rate))
+        if target_size <= 0:
+            return np.asarray([], dtype=np.float32)
+
+        source_positions = np.linspace(0.0, 1.0, num=audio.size, endpoint=False)
+        target_positions = np.linspace(0.0, 1.0, num=target_size, endpoint=False)
+        return np.interp(target_positions, source_positions, audio).astype(np.float32)

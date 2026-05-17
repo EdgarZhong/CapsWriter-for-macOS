@@ -21,7 +21,10 @@
 - 已完成：建立项目级 `uv` Python 3.13 环境，客户端与服务端依赖均已安装到 `.venv`，`uv pip check` 通过。
 - 已完成：本地 `models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit` 已导入完成，并将其切换为默认模型目录选择；本地 `1.7B-4bit` 保留为回退目录。
 - 已完成：`Downloads` 中失败残留的 `Qwen3-ASR-1.7B-MLX-4bit` 已移出下载目录并归档到项目 `.archive/`。
-- 进行中：等待在真实 MLX 依赖和真实音频输入下验证“模型加载 -> 最终结果输出”的实际闭环。
+- 已完成：真实服务端启动验证已通过，`qwen_asr_mlx` 可在 macOS 本机完成启动前模型检查并成功监听 `6016` 端口。
+- 已完成：真实音频输入闭环验证已通过，`/Users/edgar/Music/测试音频.m4a` 已成功完成“音频解码 -> 模型加载 -> 最终文本输出”。
+- 已发现并修复：`qwen_asr_mlx` 遇到非 `16kHz` 音频时会隐式依赖 `ffmpeg` 做重采样，现已在引擎层补齐本地重采样兜底。
+- 已发现：客户端在 macOS 首次真实启动时即阻塞于 `core/client/shortcut/key_mapper.py` 对 `pynput._util.win32.KeyTranslator` 的直接导入，尚未进入热键监听与录音链路。
 
 ## 当前技术判断
 
@@ -86,9 +89,9 @@
 | 输出专项规划文档 | 已完成 | 已更新为 `qwen_asr_mlx` 主路线并补模型选型 |
 | 确认 MLX 模型规格 | 已完成 | 默认 `1.7B-8bit`，本地回退 `1.7B-4bit` |
 | 设计 `qwen_asr_mlx` 适配层 | 已完成 | 已对齐 `BaseASREngine`，采用 `mlx_qwen3_asr.Session` 薄适配 |
-| 服务端最小接入实现 | 进行中 | 代码接入完成，真实依赖已装齐，待真实音频闭环验证 |
+| 服务端最小接入实现 | 已完成 | 已通过真实启动与真实音频闭环验证，非 `16kHz` 输入的重采样兜底也已补齐 |
 | 首版结果模式收敛 | 已完成 | 首版只要求松开后快速返回最终结果，不要求中间流式显示 |
-| 实现 macOS 客户端输入链路 | 待开始 | 仅覆盖当前语音输入主路径所需能力 |
+| 实现 macOS 客户端输入链路 | 进行中 | 真实启动已暴露首个阻断点：`key_mapper.py` 直接依赖 `pynput._util.win32` |
 | 更新稳定文档入口 | 已完成 | `readme.md` 已同步项目级 `uv` 环境与稳定启动方式 |
 
 ## 风险与前置条件
@@ -100,12 +103,16 @@
 ## 本轮验证
 
 - 已完成：`python -m py_compile` 验证新增和修改的服务端文件语法通过。
+- 已完成：修复 `core/server/worker/check_model.py` 的模型白名单遗漏，`qwen_asr_mlx` 不再被启动前校验误判为不支持类型。
 - 已完成：用假模块注入方式验证 `qwen_asr_mlx` 适配层的 `create_stream -> accept_waveform -> decode_stream -> cleanup` 逻辑闭环。
 - 已完成：项目级 `uv` 环境验证，`.python-version` 已固定为 `3.13`，`requirements-server.txt` 与 `requirements-client.txt` 已全部安装进 `.venv`。
 - 已完成：`uv pip check --python .venv/bin/python` 验证 223 个已安装包兼容，无缺包冲突。
 - 已完成：本地模型目录验证，`models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit` 与 `models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-4bit` 均可被默认选择逻辑识别。
 - 已完成：默认模型选择已切换为“优先本地 `1.7B-8bit`，缺失时回退本地 `1.7B-4bit`，最后回退远端 `mlx-community/Qwen3-ASR-1.7B-4bit`”。
-- 未完成：真实 `mlx-qwen3-asr` 服务启动与真实音频输入闭环验证。
+- 已完成：真实 `mlx-qwen3-asr` 服务启动验证，服务端已在本机成功监听 `0.0.0.0:6016`。
+- 已完成：真实音频 `/Users/edgar/Music/测试音频.m4a` 验证，最终识别结果为“现在开始录音。本音频用作千问三ASR Caps Writer后端MLX框架跑通的验证测试。”
+- 已完成：修复 `core/server/engines/qwen_asr_mlx/asr_engine.py`，对非 `16kHz` 音频在引擎层先做本地线性重采样，避免上游库因缺少 `ffmpeg` 而报错。
+- 已完成：真实客户端启动验证，当前阻断点已定位为 `pynput._util.win32.KeyTranslator` 的 macOS 导入失败。
 
 ## 单 Agent 编排
 
