@@ -338,6 +338,84 @@ def cmd_doctor(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# help 子命令
+# ---------------------------------------------------------------------------
+
+def cmd_help(args) -> int:
+    """打印详细命令帮助。"""
+    print("""
+CapsWriter for macOS — 使用帮助
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【服务管理】
+
+  capswriter install
+      注册 launchd 服务，使 CapsWriter 在登录后自动启动。
+      首次使用必须执行。
+
+  capswriter uninstall
+      注销 launchd 服务，取消开机自启。不删除项目文件。
+
+  capswriter start
+      在后台启动 CapsWriter（包含 server 和 client）。
+
+  capswriter stop
+      停止后台服务，并恢复 Caps Lock 原始键盘映射。
+
+  capswriter restart
+      重启后台服务（stop + start）。修改配置后使用。
+
+【状态查看】
+
+  capswriter status
+      显示 capswriterd 运行状态、launchd 注册情况
+      以及当前 Caps Lock 键盘映射快照。
+
+  capswriter doctor
+      检查运行环境与权限：
+        · .venv Python 是否存在
+        · Accessibility（辅助功能）权限是否已授权（自动粘贴需要）
+        · Input Monitoring（输入监控）权限提示（F18 监听需要）
+        · server WebSocket 端口 6016 是否可达
+
+【Caps Lock 映射管理】
+
+  capswriter remap status
+      查看当前系统 UserKeyMapping，以及 CapsWriter 保存的
+      键盘映射快照（含创建时间、active 状态、client PID）。
+
+  capswriter remap restore
+      将 Caps Lock 映射恢复为 client 启动前的原始状态。
+      ⚠  仅限 client 未运行时使用，运行中请先执行 stop。
+
+  capswriter remap clear --force
+      清空系统全部 UserKeyMapping（包括用户自定义的其他映射）。
+      ⚠  危险救援命令，仅在 restore 无效时使用。
+      ⚠  仅限 client 未运行时使用。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【典型使用流程】
+
+  1. 首次安装：
+       capswriter install        # 注册 launchd，设置开机自启
+       capswriter status         # 确认运行状态
+
+  2. 日常使用：
+       按住 Caps Lock → 说话 → 松开即上屏
+
+  3. 修改配置后生效：
+       # 修改 config_client.py / config_server.py
+       capswriter restart
+
+  4. Caps Lock 卡在 F18 映射（救援）：
+       capswriter stop
+       capswriter remap restore  # 恢复快照
+       # 或：capswriter remap clear --force （极端情况）
+""".strip())
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # remap 子命令（代理到 macos_caps_remap CLI）
 # ---------------------------------------------------------------------------
 
@@ -373,6 +451,7 @@ def _build_parser():
     sub.add_parser('restart',   help='重启后台服务')
     sub.add_parser('status',    help='查看运行状态')
     sub.add_parser('doctor',    help='环境与权限检查')
+    sub.add_parser('help',      help='显示详细帮助')
 
     remap_p = sub.add_parser('remap', help='Caps Lock remap 管理')
     remap_p.add_argument('remap_args', nargs=argparse.REMAINDER,
@@ -389,6 +468,7 @@ COMMANDS = {
     'restart':   cmd_restart,
     'status':    cmd_status,
     'doctor':    cmd_doctor,
+    'help':      cmd_help,
     'remap':     cmd_remap,
 }
 
