@@ -192,3 +192,5 @@ release
 *.exe
 
 models/**/*.cfg
+
+.DS_Store

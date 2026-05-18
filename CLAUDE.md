@@ -153,6 +153,7 @@ capswriter CLI
 | `capswriter` CLI | 已完成 | `capswriter.py` 实现；install/start/stop/restart/status/doctor/remap 子命令全部可用 |
 | launchd 自启动 | 已完成 | `capswriter install` 生成 plist 并 launchctl load；`capswriter uninstall` 注销 |
 | 配置入口整理 | 已完成 | `llm_enabled=False` 禁用 macOS LLM；Python 配置通过 `capswriter restart` 生效 |
+| F18 事件不透传终端 | 已完成 | 改用 Quartz CGEventTap 主动拦截（`kCGEventTapOptionDefault`），回调返回 None 吞掉 F18 事件，终端不再出现 `^[[32~` |
 
 ---
 

@@ -20,4 +20,7 @@ class SignalHandler:
             self.callback()
             
 def register_signal(callback):
+    # SIGINT：双击确认退出（交互场景）
     signal.signal(signal.SIGINT, SignalHandler(callback))
+    # SIGTERM：立即执行 cleanup（capswriterd / launchd 停止场景）
+    signal.signal(signal.SIGTERM, lambda signum, frame: (callback(), sys.exit(0)))
