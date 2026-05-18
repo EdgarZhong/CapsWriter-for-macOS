@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-capswriter — CapsWriter Offline 控制命令行工具。
+capswriter — CapsWriter for macOS 控制命令行工具。
 
 用法：
   capswriter install     # 注册 launchd 服务，设置开机自启
@@ -254,7 +254,7 @@ def cmd_status(args) -> int:
     installed = _launchd_installed()
     loaded = _launchd_loaded()
 
-    print("CapsWriter Offline 状态")
+    print("CapsWriter for macOS 状态")
     print("-" * 40)
     print(f"  capswriterd  : {'运行中 (pid=' + str(pid) + ')' if running else '未运行'}")
     print(f"  launchd 注册 : {'已注册' if installed else '未注册'}")
@@ -361,7 +361,7 @@ def _build_parser():
 
     parser = argparse.ArgumentParser(
         prog='capswriter',
-        description='CapsWriter Offline 控制工具',
+        description='CapsWriter for macOS 控制工具',
         add_help=True,
     )
     sub = parser.add_subparsers(dest='command', required=True)

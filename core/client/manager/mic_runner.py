@@ -57,7 +57,7 @@ class MicRunner:
         """麦克风模式主入口"""
         
         logger.info("=" * 50)
-        logger.info(f"CapsWriter Offline Client {__version__} (麦克风模式)")
+        logger.info(f"CapsWriter for macOS {__version__} (麦克风模式)")
         logger.info(f"日志级别: {Config.log_level}")
         
         # 1. 资源启动
