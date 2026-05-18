@@ -437,7 +437,12 @@ def cmd_remap(args) -> int:
 def _build_parser():
     import argparse
 
-    parser = argparse.ArgumentParser(
+    class _Parser(argparse.ArgumentParser):
+        def error(self, message):
+            sys.stderr.write(f"错误：{message}\n运行 'capswriter help' 查看所有可用命令。\n")
+            sys.exit(2)
+
+    parser = _Parser(
         prog='capswriter',
         description='CapsWriter for macOS 控制工具',
         add_help=True,
