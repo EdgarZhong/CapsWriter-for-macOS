@@ -53,6 +53,9 @@ class AudioRecorder:
         self._start_time: float = 0.0
         self._duration: float = 0.0
         self._cache: list = []
+        self._trace_id: Optional[str] = None
+        self._shortcut_key: Optional[str] = None
+        self._first_segment_logged: bool = False
 
     @property
     def state(self) -> ClientState:
@@ -94,6 +97,9 @@ class AudioRecorder:
             self._start_time = 0.0
             self._duration = 0.0
             self._cache = []
+            self._trace_id = None
+            self._shortcut_key = None
+            self._first_segment_logged = False
             
             # 音频文件管理
             file_path = None
@@ -106,7 +112,16 @@ class AudioRecorder:
                 
                 if task['type'] == 'begin':
                     self._start_time = task['time']
-                    logger.debug(f"录音开始，时间戳: {self._start_time}")
+                    self._trace_id = task.get('trace_id')
+                    self._shortcut_key = task.get('shortcut_key')
+                    self.state.bind_task_trace(self.task_id, self._trace_id)
+                    logger.info(
+                        "录音开始，"
+                        f"时间戳: {self._start_time}, "
+                        f"task_id={self.task_id}, "
+                        f"trace_id={self._trace_id}, "
+                        f"shortcut_key={self._shortcut_key}"
+                    )
                     
                 elif task['type'] == 'data':
                     # 在阈值之前积攒音频数据
@@ -129,6 +144,13 @@ class AudioRecorder:
                         self._cache.clear()
                     else:
                         data = task['data']
+
+                    if not self._first_segment_logged:
+                        self._first_segment_logged = True
+                        logger.info(
+                            f"[trace {self._trace_id}] 首个可发送音频片段已生成: "
+                            f"task_id={self.task_id}, samples={len(data)}"
+                        )
                     
                     # 保存音频至本地文件
                     self._duration += len(data) / 48000
@@ -184,6 +206,10 @@ class AudioRecorder:
                     console.print(f'任务标识：{self.task_id}')
                     console.print(f'    录音时长：{self._duration:.2f}s')
                     logger.info(f"录音任务完成，任务ID: {self.task_id}, 时长: {self._duration:.2f}s")
+                    logger.info(
+                        f"[trace {self._trace_id}] 已发送最终结束片段: "
+                        f"task_id={self.task_id}, duration={self._duration:.2f}s"
+                    )
                     
                     # 告诉服务端音频片段结束了
                     message = AudioMessage(
@@ -201,7 +227,10 @@ class AudioRecorder:
                     break
                     
         except Exception as e:
-            logger.error(f"录音任务错误: {e}", exc_info=True)
+            logger.error(
+                f"录音任务错误: {e}, task_id={self.task_id}, trace_id={self._trace_id}",
+                exc_info=True
+            )
     
     def get_file_manager(self) -> Optional[AudioFileManager]:
         """获取当前的文件管理器"""

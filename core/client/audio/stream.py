@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import time
 import threading
+import platform
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -54,6 +55,8 @@ class AudioStreamManager:
         self.app = app
         self._channels = 1
         self._running = False  # 标志是否应该运行
+        self._recording_session_count = 0
+        self._session_lock = threading.RLock()
 
     @property
     def state(self) -> ClientState:
@@ -80,14 +83,105 @@ class AudioStreamManager:
         
         # 将数据放入队列
         if self.app.loop and self.state.queue_in:
+            enqueue_time = time.time()
+            trace_id = self.state.active_trace_id
+            audio_data = indata.copy()
+
+            # 记录前几帧音频的能量特征，用于判断当前录音链路里拿到的到底是
+            # 真实麦克风波形、近零静音帧，还是异常的全零数据。
+            mean_abs = float(np.mean(np.abs(audio_data)))
+            rms = float(np.sqrt(np.mean(np.square(audio_data))))
+            peak = float(np.max(np.abs(audio_data)))
+            zero_ratio = float(np.mean(audio_data == 0.0))
+            channels = int(audio_data.shape[1]) if audio_data.ndim > 1 else 1
+
+            # 这里只记录“第一帧真正进入队列”的时刻。
+            # 如果后续发现录音任务并不是由按键按下直接驱动，这个点会和按键时间线明显错位。
+            self.state.mark_first_audio_enqueue(
+                trace_id=trace_id,
+                enqueue_time=enqueue_time,
+                frames=frames,
+            )
+            self.state.mark_audio_metrics(
+                trace_id=trace_id,
+                rms=rms,
+                peak=peak,
+                mean_abs=mean_abs,
+                zero_ratio=zero_ratio,
+                channels=channels,
+            )
             asyncio.run_coroutine_threadsafe(
                 self.state.queue_in.put({
                     'type': 'data',
-                    'time': time.time(),
-                    'data': indata.copy(),
+                    'time': enqueue_time,
+                    'data': audio_data,
+                    'trace_id': trace_id,
                 }),
                 self.app.loop
             )
+
+    def should_start_immediately(self) -> bool:
+        """
+        判断当前平台是否需要在客户端启动时立即打开输入流。
+
+        macOS 的新 Caps Lock 方案要求：
+        - 客户端空闲时不要长期占用麦克风；
+        - 只有长按真正进入录音时，系统左侧麦克风指示才应该出现。
+        因此在 Darwin + `remap_f18` 模式下默认走按需开流。
+        """
+        from config_client import ClientConfig as Config
+
+        if platform.system() != 'Darwin':
+            return True
+
+        if getattr(Config, 'macos_caps_mode', 'off') != 'remap_f18':
+            return True
+
+        return not getattr(Config, 'macos_caps_open_stream_on_demand', True)
+
+    def start_recording_session(self) -> bool:
+        """
+        声明一次新的录音会话即将开始。
+
+        返回值语义：
+        - `True`：当前录音会话具备可用音频流；
+        - `False`：音频流启动失败，本次录音不应继续推进。
+        """
+        with self._session_lock:
+            self._recording_session_count += 1
+
+            if self.should_start_immediately():
+                success = self.state.stream is not None or self.start() is not None
+                if not success and self._recording_session_count > 0:
+                    self._recording_session_count -= 1
+                return success
+
+            if self.state.stream is None:
+                logger.info("[audio] stream open requested by recording session")
+                success = self.start() is not None
+                if not success and self._recording_session_count > 0:
+                    self._recording_session_count -= 1
+                return success
+
+            return True
+
+    def stop_recording_session(self) -> None:
+        """
+        声明一次录音会话已经结束。
+
+        在 macOS 按需开流模式下，最后一个录音会话结束时立即关闭输入流，
+        让系统麦克风占用指示同步消失。
+        """
+        with self._session_lock:
+            if self._recording_session_count > 0:
+                self._recording_session_count -= 1
+
+            if self.should_start_immediately():
+                return
+
+            if self._recording_session_count == 0 and self.state.stream is not None:
+                logger.info("[audio] stream close requested by recording session end")
+                self.stop()
     
     def _on_stream_finished(self) -> None:
         """音频流结束回调"""
@@ -142,6 +236,7 @@ class AudioStreamManager:
             
             self.state.stream = stream
             self._running = True
+            logger.info("[audio] stream open")
             logger.debug(
                 f"音频流已启动: 采样率={self.SAMPLE_RATE}, "
                 f"块大小={int(self.BLOCK_DURATION * self.SAMPLE_RATE)}"
@@ -158,9 +253,11 @@ class AudioStreamManager:
             return
             
         self._running = False  # 标记为停止
+        self._recording_session_count = 0
         if self.state.stream is not None:
             try:
                 self.state.stream.close()
+                logger.info("[audio] stream close")
                 logger.debug("音频流已停止")
             except Exception as e:
                 logger.debug(f"停止音频流时发生错误: {e}")

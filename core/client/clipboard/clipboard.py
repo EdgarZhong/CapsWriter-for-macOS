@@ -10,7 +10,9 @@
 """
 import asyncio
 import platform
+import subprocess
 from contextlib import contextmanager
+from typing import Optional
 import pyclip
 from pynput import keyboard
 from . import logger
@@ -18,6 +20,69 @@ from . import logger
 
 # 支持的编码列表
 CLIPBOARD_ENCODINGS = ['utf-8', 'gbk', 'utf-16', 'latin1']
+
+
+def _read_clipboard_raw() -> bytes:
+    """
+    读取原始剪贴板字节流。
+
+    设计说明：
+    1. macOS 下优先走 `pbpaste` 子进程，避免在主进程里直接通过 `pyclip`
+       触碰 Pasteboard / CoreFoundation 对象，尽量降低 `CFDataValidateRange`
+       这类底层断言干扰主程序的概率。
+    2. 其他平台继续复用现有 `pyclip` 行为，保持兼容性。
+    """
+    if platform.system() == 'Darwin':
+        result = subprocess.run(
+            ['pbpaste'],
+            check=True,
+            capture_output=True,
+        )
+        return result.stdout
+
+    clipboard_data = pyclip.paste()
+    if isinstance(clipboard_data, bytes):
+        return clipboard_data
+    if isinstance(clipboard_data, str):
+        return clipboard_data.encode('utf-8')
+    return b''
+
+
+def _write_clipboard_raw(data: bytes) -> None:
+    """
+    写入原始剪贴板字节流。
+
+    设计说明：
+    1. macOS 下统一改走 `pbcopy`，让系统剪贴板交互发生在独立子进程里。
+    2. 这里保留 bytes 级接口，是为了后续如需恢复“非 UTF-8 文本”时仍有
+       明确边界；当前上层主要传入的仍然是 UTF-8 文本字节。
+    """
+    if platform.system() == 'Darwin':
+        subprocess.run(
+            ['pbcopy'],
+            input=data,
+            check=True,
+        )
+        return
+
+    pyclip.copy(data)
+
+
+def _decode_clipboard_bytes(clipboard_data: bytes) -> str:
+    """
+    将剪贴板字节流尽量解码为字符串。
+
+    这里保留原有“多编码兜底”的策略，避免历史中文环境下的剪贴板内容
+    因编码不一致直接丢失。
+    """
+    for encoding in CLIPBOARD_ENCODINGS:
+        try:
+            return clipboard_data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    logger.debug(f"剪贴板解码失败，尝试了编码: {CLIPBOARD_ENCODINGS}")
+    return ""
 
 
 def safe_paste() -> str:
@@ -30,25 +95,17 @@ def safe_paste() -> str:
         解码后的文本字符串，失败返回空字符串
     """
     try:
-        clipboard_data = pyclip.paste()
-
-        # 尝试多种编码方式
-        for encoding in CLIPBOARD_ENCODINGS:
-            try:
-                return clipboard_data.decode(encoding)
-            except (UnicodeDecodeError, AttributeError):
-                continue
-
-        # 如果所有编码都失败，返回空字符串
-        logger.debug(f"剪贴板解码失败，尝试了编码: {CLIPBOARD_ENCODINGS}")
-        return ""
+        clipboard_data = _read_clipboard_raw()
+        if not clipboard_data:
+            return ""
+        return _decode_clipboard_bytes(clipboard_data)
 
     except Exception as e:
         logger.warning(f"剪贴板读取失败: {e}")
         return ""
 
 
-def safe_copy(content: str) -> bool:
+def safe_copy(content: Optional[str]) -> bool:
     """
     安全地复制内容到剪贴板
 
@@ -58,11 +115,14 @@ def safe_copy(content: str) -> bool:
     Returns:
         是否成功
     """
-    if not content:
+    # 这里不再把空字符串视为“非法输入”。
+    # 原因是 macOS 下恢复剪贴板时，原内容本来就可能是空串；如果直接跳过，
+    # 会把“清空前的临时识别结果”残留在系统剪贴板里。
+    if content is None:
         return False
 
     try:
-        pyclip.copy(content)
+        _write_clipboard_raw(content.encode('utf-8'))
         logger.debug(f"剪贴板写入成功，长度: {len(content)}")
         return True
     except Exception as e:
@@ -95,8 +155,7 @@ def save_and_restore_clipboard():
     try:
         yield
     finally:
-        if original:
-            pyclip.copy(original)
+        if safe_copy(original):
             logger.debug("剪贴板已恢复")
 
 
@@ -109,15 +168,15 @@ async def paste_text(text: str, restore_clipboard: bool = True):
         restore_clipboard: 粘贴后是否恢复原剪贴板内容
     """
     # 保存剪切板
-    original = ''
+    original: Optional[str] = None
     if restore_clipboard:
         try:
             original = safe_paste()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"读取原始剪贴板失败，跳过恢复流程: {e}")
 
     # 复制要粘贴的文本
-    pyclip.copy(text)
+    safe_copy(text)
     logger.debug(f"已复制文本到剪贴板，长度: {len(text)}")
 
     # 粘贴结果（使用 pynput 模拟 Ctrl+V）
@@ -134,7 +193,7 @@ async def paste_text(text: str, restore_clipboard: bool = True):
     logger.debug("已发送粘贴命令 (Ctrl+V)")
 
     # 还原剪贴板
-    if restore_clipboard and original:
+    if restore_clipboard and original is not None:
         await asyncio.sleep(0.1)
-        pyclip.copy(original)
-        logger.debug("剪贴板已恢复")
+        if safe_copy(original):
+            logger.debug("剪贴板已恢复")

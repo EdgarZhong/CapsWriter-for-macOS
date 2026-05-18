@@ -1,4 +1,5 @@
 import os
+import platform
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -33,6 +34,18 @@ class ClientConfig:
     ]
 
     threshold    = 0.3          # 快捷键触发阈值（秒）
+
+    # macOS Caps Lock 新路线配置：
+    # 1. `remap_f18` 表示运行期把物理 Caps Lock 临时映射成 F18，再由客户端监听 F18。
+    # 2. `native_tap` 仅保留为历史文档口径，不再接入主程序。
+    # 3. `off` 表示不接管 macOS Caps Lock。
+    macos_caps_mode = 'remap_f18'
+    macos_caps_remap_enabled = True
+    macos_caps_remap_target = 'f18'
+    macos_caps_hold_threshold_ms = 200
+    macos_caps_synth_caps_hold_ms = 120
+    macos_caps_restore_on_exit = True
+    macos_caps_open_stream_on_demand = platform.system() == 'Darwin'
 
     paste        = False        # 是否以写入剪切板然后模拟 Ctrl-V 粘贴的方式输出结果
     restore_clip = True         # 模拟粘贴后是否恢复剪贴板
@@ -126,4 +139,3 @@ r"""
   {'key': 'f12', 'type': 'keyboard', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
   {'key': 'x2', 'type': 'mouse', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
 """
-

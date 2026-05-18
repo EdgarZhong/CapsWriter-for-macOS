@@ -10,6 +10,8 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+from platform import system
+from typing import TYPE_CHECKING, Optional
 
 from .state import ClientState
 from . import logger
@@ -25,16 +27,14 @@ from .manager import (
 from .audio.stream import AudioStreamManager
 from .shortcut.shortcut_manager import ShortcutManager
 from .shortcut.shortcut_config import Shortcut
-
 from .udp.udp_control import UDPController
-
 from .hotword.manager import HotwordManager
 from .llm.llm_handler import LLMHandler
 from .output.text_output import TextOutput
 from .diary.diary_writer import DiaryWriter
 from core.tools.empty_working_set import empty_current_working_set
-from platform import system
-
+if TYPE_CHECKING:
+    from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
 
 
 class CapsWriterClient:
@@ -76,9 +76,27 @@ class CapsWriterClient:
         self.stream = AudioStreamManager(self)
         self.shortcut = ShortcutManager(self, [Shortcut(**sc) for sc in Config.shortcuts])
         self.udp = UDPController(self.shortcut)
+        self.macos_caps_bridge: Optional[MacOSCapsF18Bridge] = None
+
+        # macOS 新方案把物理 Caps Lock 在客户端运行期间临时映射成 F18，
+        # 这里仅负责在应用内部建立“F18 语义 -> 录音状态机”的桥接。
+        if system() == 'Darwin' and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18':
+            from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
+
+            self.macos_caps_bridge = MacOSCapsF18Bridge(self)
 
         # 内存清理
         empty_current_working_set()
+
+    def start_platform_shortcut_bridge(self) -> None:
+        """启动平台专用的快捷键桥接器。"""
+        if self.macos_caps_bridge is not None:
+            self.macos_caps_bridge.start()
+
+    def stop_platform_shortcut_bridge(self) -> None:
+        """停止平台专用的快捷键桥接器。"""
+        if self.macos_caps_bridge is not None:
+            self.macos_caps_bridge.stop()
 
     def stop(self):
         """
@@ -88,6 +106,7 @@ class CapsWriterClient:
 
         # 1. 停止核心运行组件
         self.udp.stop()
+        self.stop_platform_shortcut_bridge()
         self.shortcut.stop()
         self.stream.stop()
 
@@ -137,5 +156,4 @@ class CapsWriterClient:
             self.loop.run_until_complete(runner.run())
         except RuntimeError:
             ...
-
 

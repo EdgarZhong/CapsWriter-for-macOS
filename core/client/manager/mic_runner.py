@@ -33,9 +33,13 @@ class MicRunner:
         # 2. UI 提示
         TipsDisplay.show_mic_tips()
 
-        # 3. 开启运行组件 (音频流、快捷键监听)
-        self.app.stream.start()
+        # 3. 开启运行组件（快捷键监听始终需要先启动；音频流是否常驻则由平台策略决定）
+        if self.app.stream.should_start_immediately():
+            self.app.stream.start()
+        else:
+            logger.info("当前平台采用按需开流策略，客户端空闲时不预先占用麦克风")
         self.app.shortcut.start()
+        self.app.start_platform_shortcut_bridge()
         
         # 4. 开启 UDP 控制 (如果启用)
         if Config.udp_control:
@@ -61,4 +65,3 @@ class MicRunner:
         self.processor = ResultProcessor(self.app)
         await self.processor.start()
             
-

@@ -40,6 +40,8 @@ uv pip install --python .venv/bin/python -r requirements-client.txt
 .venv/bin/python start_client.py
 ```
 
+- macOS 当前稳定客户端入口仍是 `start_client.py`；在麦克风实时模式下，它会先通过父进程临时把物理 `Caps Lock` 映射成 `F18`，客户端退出后自动恢复原始键位映射。
+
 ## 项目目录结构
 
 ```text
@@ -114,7 +116,7 @@ CapsWriter-Offline/
 | 当前阶段目标、任务看板、阶段决策 | `CLAUDE.md` |
 | 打包说明 | `assets/BUILD_GUIDE.md` |
 | 更新日志 | `docs/CHANGELOG.md` |
-| Qwen3-ASR macOS 专项规划与模型选型 | `docs/Qwen3-ASR_macOS_最小适配规划.md` |
+| Qwen3-ASR macOS 专项规划、模型选型与客户端输入/上屏规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` |
 | 模型下载与目录说明 | `docs/模型下载的若干问题.md` |
 | 环境依赖安装 | `docs/环境依赖安装说明.md` |
 | 识别语言配置 | `docs/识别语言如何配置.md` |

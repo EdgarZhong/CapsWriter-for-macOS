@@ -75,11 +75,6 @@ class ShortcutManager:
         # 这里单独记录物理按下集合，避免自动重复触发时反复启动录音。
         self._pressed_keys = set()
 
-        # macOS 下 `Caps Lock` 不能依赖 `pynput` 默认回调：
-        # `pynput` 在 Darwin 后端会把它折叠成一次假的 press + release。
-        # 因此这里额外维护一份真实物理按下状态，由 Quartz flagsChanged 事件驱动。
-        self._darwin_caps_lock_down = False
-
         # 事件处理器
         self._event_handler = ShortcutEventHandler(self.tasks, self._pool, self._emulator)
 
@@ -163,42 +158,6 @@ class ShortcutManager:
             return True
 
         return win32_event_filter
-
-    def create_darwin_keyboard_interceptor(self):
-        """
-        创建 macOS 键盘事件拦截器。
-
-        设计要点：
-        1. 只对 `Caps Lock` 做底层拦截，避免系统真的切换大小写锁定。
-        2. 使用 Quartz 的 `flagsChanged` + `AlphaShift` 标志推导真实按下/松开。
-        3. 其它普通按键继续走 `pynput` 标准回调，减少平台差异面的扩散。
-        """
-        if Quartz is None:
-            return None
-
-        caps_task = self.tasks.get('caps_lock')
-        if caps_task is None:
-            return None
-
-        def darwin_intercept(event_type, event):
-            key_code = Quartz.CGEventGetIntegerValueField(
-                event,
-                Quartz.kCGKeyboardEventKeycode,
-            )
-
-            # 57 是 macOS / Apple 官方文档中的 Caps Lock 虚拟键码。
-            if event_type == Quartz.kCGEventFlagsChanged and key_code == 57:
-                flags = Quartz.CGEventGetFlags(event)
-                is_key_down = bool(flags & Quartz.kCGEventFlagMaskAlphaShift)
-                self._handle_darwin_caps_lock_transition(is_key_down, caps_task, event_type)
-
-                # 只在配置要求阻塞时吞掉系统事件，避免真实切换大小写锁定。
-                if caps_task.shortcut.suppress:
-                    return None
-
-            return event
-
-        return darwin_intercept
 
     def create_mouse_filter(self):
         """创建鼠标事件过滤器"""
@@ -318,29 +277,44 @@ class ShortcutManager:
         """将“某个逻辑键已释放”统一分发给事件处理器。"""
         self._event_handler.handle_keyup(key_name, task)
 
-    def _handle_darwin_caps_lock_transition(self, is_key_down: bool, task, event_type) -> None:
+    def start_press_to_talk(self, key_name: str) -> None:
         """
-        处理 macOS 下 `Caps Lock` 的真实物理状态切换。
+        按平台语义直接启动一次“按住说话”录音。
 
-        `pynput` 在 macOS 上会把 `Caps Lock` 折叠成一对即时的 press/release，
-        无法支持“按住说话、松开结束”。因此这里只信任底层 `flagsChanged`
-        事件，并按 `AlphaShift` 标志位的变化维护独立状态机。
+        这里不经过 `handle_keydown` 的原因是：
+        - 新的 macOS `Caps Lock -> F18` 路线需要先经历“短按/长按”判定；
+        - 一旦确认是长按，应该立即进入现有录音链路，而不是再走一遍
+          `hold_mode` 的键盘事件状态机。
         """
-        if self._darwin_caps_lock_down == is_key_down:
+        task = self.tasks.get(key_name)
+        if task is None:
+            logger.debug(f"[{key_name}] 未找到快捷键任务，忽略 start_press_to_talk")
             return
 
-        self._darwin_caps_lock_down = is_key_down
-        key_name = 'caps_lock'
-
-        if self._check_emulating_mac(key_name, event_type, is_key_down=is_key_down):
-            return
-        if self._check_restoring_mac(key_name, event_type, is_key_down=is_key_down):
+        if task.is_recording:
+            logger.debug(f"[{key_name}] 录音任务已在运行，忽略重复 start_press_to_talk")
             return
 
-        if is_key_down:
-            self._dispatch_task_keydown(key_name, task)
-        else:
-            self._dispatch_task_keyup(key_name, task)
+        logger.info(f"[{key_name}] 语义长按成立，启动按住说话录音")
+        task.launch()
+
+    def stop_press_to_talk(self, key_name: str) -> None:
+        """
+        按平台语义结束一次“按住说话”录音。
+
+        只有在任务已真正进入录音状态时才结束，避免短按路径误触发 finish。
+        """
+        task = self.tasks.get(key_name)
+        if task is None:
+            logger.debug(f"[{key_name}] 未找到快捷键任务，忽略 stop_press_to_talk")
+            return
+
+        if not task.is_recording:
+            logger.debug(f"[{key_name}] 当前未在录音，忽略 stop_press_to_talk")
+            return
+
+        logger.info(f"[{key_name}] 语义长按结束，停止按住说话录音")
+        task.finish()
 
     # ========== 按键恢复管理 ==========
 
@@ -486,7 +460,6 @@ class ShortcutManager:
                     self.keyboard_listener = keyboard.Listener(
                         on_press=self._on_darwin_press,
                         on_release=self._on_darwin_release,
-                        darwin_intercept=self.create_darwin_keyboard_interceptor(),
                     )
                 else:
                     self.keyboard_listener = keyboard.Listener(
@@ -545,3 +518,25 @@ class ShortcutManager:
         # 关闭线程池
         self._pool.shutdown(wait=False)
         logger.debug("快捷键管理器线程池已关闭")
+
+    def should_restore_key_after_finish(self, key: str, shortcut) -> bool:
+        """
+        判断录音完成后是否需要主动 restore 某个切换键。
+
+        设计原则：
+        - 非切换键永远不需要 restore。
+        - 常规历史语义仍保持兼容：非阻塞模式下需要 restore；
+          旧版 Darwin 兜底逻辑也仍保留。
+        - 当 macOS 已改走 `Caps Lock -> F18` 路线时，长按录音不会直接改变
+          系统大小写锁定状态，因此结束录音后不能再补一次 `Caps Lock`。
+        """
+        if not shortcut.is_toggle_key():
+            return False
+
+        if self._system_name == 'Darwin' and key == 'caps_lock':
+            from config_client import ClientConfig as Config
+
+            if getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18':
+                return False
+
+        return (not shortcut.suppress) or self._system_name == 'Darwin'

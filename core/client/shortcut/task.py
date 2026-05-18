@@ -47,6 +47,7 @@ class ShortcutTask:
         self.task: Optional[asyncio.Future] = None
         self.recording_start_time: float = 0.0
         self.is_recording: bool = False
+        self.trace_id: Optional[str] = None
 
         # hold_mode 状态跟踪
         self.pressed: bool = False
@@ -73,7 +74,16 @@ class ShortcutTask:
 
     def launch(self) -> None:
         """启动录音任务"""
-        logger.info(f"[{self.shortcut.key}] 触发：开始录音")
+        # 使用“快捷键名 + 纳秒时间戳”构造一次性 trace_id，
+        # 便于把按键事件、音频入队、识别任务和最终结果串成同一条时间线。
+        self.trace_id = f"{self.shortcut.key}-{time.time_ns()}"
+        logger.info(f"[{self.shortcut.key}] 触发：开始录音, trace_id={self.trace_id}")
+
+        # macOS 新路线要求“只在真正录音时占用麦克风”，因此在宣布开始录音前，
+        # 先让音频流管理器按需打开输入流。
+        if not self.app.stream.start_recording_session():
+            logger.error(f"[{self.shortcut.key}] 无法启动录音所需音频流，放弃本次录音")
+            return
 
         # 记录开始时间
         self.recording_start_time = time.time()
@@ -81,12 +91,22 @@ class ShortcutTask:
 
         # 将开始标志放入队列
         asyncio.run_coroutine_threadsafe(
-            self.state.queue_in.put({'type': 'begin', 'time': self.recording_start_time, 'data': None}),
+            self.state.queue_in.put({
+                'type': 'begin',
+                'time': self.recording_start_time,
+                'data': None,
+                'trace_id': self.trace_id,
+                'shortcut_key': self.shortcut.key,
+            }),
             self.app.loop
         )
 
         # 更新录音状态
-        self.state.start_recording(self.recording_start_time)
+        self.state.start_recording(
+            self.recording_start_time,
+            trace_id=self.trace_id,
+            shortcut_key=self.shortcut.key,
+        )
 
         # 打印动画：正在录音
         self._status.start()
@@ -100,10 +120,12 @@ class ShortcutTask:
 
     def cancel(self) -> None:
         """取消录音任务（时间过短）"""
-        logger.debug(f"[{self.shortcut.key}] 取消录音任务（时间过短）")
+        logger.debug(f"[{self.shortcut.key}] 取消录音任务（时间过短）, trace_id={self.trace_id}")
 
         self.is_recording = False
+        self.state.mark_recording_cancel_requested(self.trace_id, time.time())
         self.state.stop_recording()
+        self.app.stream.stop_recording_session()
         self._status.stop()
 
         self.task.cancel()
@@ -111,32 +133,46 @@ class ShortcutTask:
 
     def finish(self) -> None:
         """完成录音任务"""
-        logger.info(f"[{self.shortcut.key}] 释放：完成录音")
+        finish_time = time.time()
+        logger.info(f"[{self.shortcut.key}] 释放：完成录音, trace_id={self.trace_id}")
 
         self.is_recording = False
+        self.state.mark_recording_finish_requested(self.trace_id, finish_time)
         self.state.stop_recording()
+        self.app.stream.stop_recording_session()
         self._status.stop()
 
         asyncio.run_coroutine_threadsafe(
             self.state.queue_in.put({
                 'type': 'finish',
-                'time': time.time(),
-                'data': None
+                'time': finish_time,
+                'data': None,
+                'trace_id': self.trace_id,
+                'shortcut_key': self.shortcut.key,
             }),
             self.app.loop
         )
 
-        # 执行 restore（可恢复按键）
-        #
-        # Windows 下原设计是假设 `suppress=True` 时系统收不到该按键，因此无需恢复。
-        # 但 macOS 上 `Caps Lock` 即使被监听到，系统层的锁定切换也不一定会被完全压住，
-        # 从真实测试看，长按录音结束后仍可能把大小写锁定留在错误状态。
-        # 因此在 macOS 下，对这类切换键无论是否 suppress，都统一补一次恢复，
-        # 以保证“长按说话后最终不要留下 Caps Lock 被切换”的交互结果。
-        if self.shortcut.is_toggle_key() and (
-            not self.shortcut.suppress or platform.system() == 'Darwin'
-        ):
+        # 是否需要 restore 不再由 Task 自己硬编码平台特判，而是交给管理器统一判断。
+        # 这样当 macOS `Caps Lock` 改走原生 HID tap 后，就可以自然地表达：
+        # “物理事件已经被底层吞掉，因此长按结束后不应该再补一次 restore”。
+        if self._should_restore_after_finish():
             self._restore_key()
+
+    def _should_restore_after_finish(self) -> bool:
+        """
+        判断当前任务结束后是否需要 restore。
+
+        优先委托给 `ShortcutManager` 做平台级和输入链路级决策；
+        只有在管理器缺失时，才回退到原有的兼容逻辑。
+        """
+        manager = self._manager_ref() if hasattr(self, '_manager_ref') else None
+        if manager is not None:
+            return manager.should_restore_key_after_finish(self.shortcut.key, self.shortcut)
+
+        return self.shortcut.is_toggle_key() and (
+            not self.shortcut.suppress or platform.system() == 'Darwin'
+        )
 
     def _restore_key(self) -> None:
         """恢复按键状态（防自捕获逻辑由 ShortcutManager 处理）"""

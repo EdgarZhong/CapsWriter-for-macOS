@@ -6,7 +6,7 @@ LLM Typing 输出模式
 - paste=False: 实时流式 write，每个字都打出来
 """
 import asyncio
-import keyboard
+import platform
 
 from config_client import ClientConfig as Config
 from core.tools.asyncio_to_thread import to_thread
@@ -15,9 +15,43 @@ from core.client.clipboard import paste_text
 from . import logger
 
 
+def _write_text_with_keyboard(text: str) -> None:
+    """
+    仅在必须走实时打字时才懒加载 `keyboard`。
+
+    设计说明：
+    1. 真实问题已经表明，macOS 下仅仅导入 `keyboard` 模块都可能触发
+       `CFDataValidateRange` 断言。
+    2. 因此这里改成局部导入，把 `keyboard` 的生命周期严格限制在
+       “非 macOS 且确实需要实时打字”的分支里。
+    """
+    import keyboard
+
+    keyboard.write(text)
+
+
+def _resolve_output_mode(paste: bool = None) -> bool:
+    """
+    统一解析当前这次输出是否必须走粘贴模式。
+
+    设计说明：
+    1. Windows 保持原有行为，继续允许实时 `keyboard.write`。
+    2. macOS 首版以“稳定上屏”优先，因此即便 LLM 链路没有走 `TextOutput`
+       这个门面，也要在这里再次强制收口到粘贴模式，避免默认分支漏回
+       `keyboard.write`。
+    """
+    if platform.system() == 'Darwin':
+        return True
+    if paste is None:
+        return Config.paste
+    return paste
+
+
 async def handle_typing_mode(handler, text: str, paste: bool = None, matched_hotwords=None, role_config=None, content=None) -> tuple:
     """打字输出模式"""
     from .llm_error_handler import handle_llm_error
+    paste = _resolve_output_mode(paste)
+
     # 如果没传，则现场检测一次（兼容性）
     if not role_config or content is None:
         role_config, content = handler.detect_role(text)
@@ -85,7 +119,7 @@ async def _process_streaming(handler, role_config, content, matched_hotwords) ->
 
         if content_to_write:
             logger.debug(f"output_text: keyboard.write '{content_to_write}'")
-            keyboard.write(content_to_write)
+            _write_text_with_keyboard(content_to_write)
             pending_buffer = trailing
         else:
             pending_buffer = trailing
@@ -104,21 +138,22 @@ async def _process_streaming(handler, role_config, content, matched_hotwords) ->
     if not chunks:
         final_text = TextOutput.strip_punc(content)
         logger.debug(f"output_text: keyboard.write '{final_text}' (降级)")
-        keyboard.write(final_text)
+        _write_text_with_keyboard(final_text)
         return (final_text, 0, 0.0)
     
     # 如果 LLM 只输出标点，会被拦截，就要做补偿输出
     full_output = ''.join(chunks).strip()
     if len(full_output) == 1 and full_output in Config.trash_punc:
-        keyboard.write(full_output)
+        _write_text_with_keyboard(full_output)
     
     return (TextOutput.strip_punc(polished_text), token_count, gen_time)
 
 
 async def output_text(text: str, paste: bool = None):
     """输出文本（根据 paste 或 Config.paste 选择方式）"""
+    paste = _resolve_output_mode(paste)
     if paste:
         await paste_text(text, restore_clipboard=Config.restore_clip)
     else:
         logger.debug(f"output_text: keyboard.write '{text}'")
-        keyboard.write(text)
+        _write_text_with_keyboard(text)

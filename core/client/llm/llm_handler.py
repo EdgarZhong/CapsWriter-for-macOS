@@ -216,9 +216,13 @@ class LLMHandler:
 
         # 2. 如果不匹配任何需要处理的角色
         if not role_config:
+            logger.info(
+                f"LLM 未匹配到角色，直接输出原文本: length={len(text)}, paste={paste}"
+            )
 
             # 打字输出
             await output_text(text, paste)
+            logger.info("LLM 未匹配角色时的直接输出已完成")
             
             # 更新全局状态并 UDP 广播
             self.app.state.set_output_text(text)
@@ -230,9 +234,18 @@ class LLMHandler:
 
         # 4. 根据输出模式分发处理
         if role_config.output_mode == 'toast':
+            logger.info(
+                f"LLM 命中角色输出模式: role={role_config.name}, mode=toast, paste={paste}"
+            )
             result, token_count, gen_time = await handle_toast_mode(self, text, role_config, matched_hotwords, content)
         else: # typing
+            logger.info(
+                f"LLM 命中角色输出模式: role={role_config.name}, mode=typing, paste={paste}"
+            )
             result, token_count, gen_time = await handle_typing_mode(self, text, paste, matched_hotwords, role_config, content)
+        logger.info(
+            f"LLM 输出流程结束: role={role_config.name}, result_length={len(result) if result else 0}"
+        )
 
         # 5. 后置处理
         # 更新全局状态（即便是中断了，也记录已经输出的部分）
@@ -302,5 +315,4 @@ if __name__ == "__main__":
             handler.stop()
 
     asyncio.run(run_test_cases())
-
 

@@ -10,10 +10,9 @@ LLM 获取选中文字功能
 """
 import time
 import platform
-import pyclip
 from pynput import keyboard as pynput_keyboard
 from . import logger
-from .llm_clipboard import safe_paste
+from .llm_clipboard import safe_paste, safe_copy
 
 
 # 全局变量：记录每个角色最后一次使用的选中文字
@@ -70,8 +69,11 @@ def get_selected_text(role_config, state) -> str:
         # 读取新的剪贴板内容
         selected_text = safe_paste()
 
-        # 还原原来的剪贴板内容
-        pyclip.copy(original_clipboard)
+        # 还原原来的剪贴板内容。
+        # 这里统一改走 `safe_copy()`，确保 macOS 下不会再直接命中
+        # `pyclip` 的 Pasteboard 后端，避免把结果输出链路和选区读取链路
+        # 分别落到两套不同的系统剪贴板实现上。
+        safe_copy(original_clipboard)
 
         # 如果内容没有变化，说明没有选中文字，返回空字符串
         if selected_text == original_clipboard or selected_text == state.last_output_text:

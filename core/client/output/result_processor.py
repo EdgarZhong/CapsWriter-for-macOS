@@ -132,19 +132,24 @@ class ResultProcessor:
     def _log_modifier_key_state(self) -> None:
         """
         检测并记录当前按下的所有键
-        
+
         用于调试按键卡住问题。
+        macOS 上 import keyboard 会触发 CFDataValidateRange 断言导致崩溃，
+        因此在 Darwin 平台直接跳过。
         """
+        import platform
+        if platform.system() == 'Darwin':
+            return
+
         try:
             import keyboard
-            
+
             # 获取所有当前按下的键
             pressed_keys = keyboard._pressed_events
-            
-            # if pressed_keys:
+
             key_names = list(pressed_keys.keys())
             logger.debug(f"当前按下的键: {key_names}")
-                
+
         except Exception as e:
             logger.debug(f"检测按键状态失败: {e}")
     
@@ -180,9 +185,23 @@ class ResultProcessor:
         text = message.text
         original_text = text  # 保存原始识别结果
         delay = message.time_complete - message.time_submit
+        trace_context = None
 
         if message.is_final:
+            trace_context = self.state.pop_trace_context_by_task_id(message.task_id)
             logger.info(f"收到最终识别结果: {text}, 时延: {delay:.2f}s")
+            if trace_context is not None:
+                logger.info(
+                    f"[trace {trace_context['trace_id']}] 最终识别结果已返回客户端: "
+                    f"task_id={message.task_id}, "
+                    f"shortcut_key={trace_context.get('shortcut_key')}, "
+                    f"recording_start_time={trace_context.get('recording_start_time')}, "
+                    f"first_audio_enqueue_time={trace_context.get('first_audio_enqueue_time')}, "
+                    f"finish_requested_time={trace_context.get('finish_requested_time')}, "
+                    f"cancel_requested_time={trace_context.get('cancel_requested_time')}, "
+                    f"time_submit={message.time_submit}, "
+                    f"time_complete={message.time_complete}"
+                )
         else:
             logger.debug(
                 f"接收到识别结果，文本: {text[:50]}{'...' if len(text) > 50 else ''}, "
