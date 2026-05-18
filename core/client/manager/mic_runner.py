@@ -47,7 +47,8 @@ class MicRunner:
 
         # 5. 开启后台服务 (热词、LLM)
         self.app.hotword.start()
-        self.app.llm.start()
+        if Config.llm_enabled:
+            self.app.llm.start()
 
     async def run(self):
         """麦克风模式主入口"""
