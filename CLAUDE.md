@@ -149,10 +149,10 @@ capswriter CLI
 | 修复 macOS GUI 崩溃 | 已完成 | toast/context/hotword handler 加 Darwin no-op；tray 本身已有 platform 检查 |
 | 长按期间 Caps Lock 状态保护 | 已完成 | hidutil 在 HID 状态机之前拦截，物理长按不会改变系统 Caps Lock 状态，无需额外处理 |
 | 日志接线 | 已完成 | `macos_caps_remap.py` 接入 client logger；其余 macOS 新模块均通过 `from . import logger` 接入 |
-| `capswriterd` 控制器 | 未开始 | 单例后台 controller，管理 server/client 生命周期 |
-| `capswriter` CLI | 未开始 | install/start/stop/restart/status/doctor/remap 子命令 |
-| launchd 自启动 | 未开始 | 只注册 `capswriterd` |
-| 配置入口整理 | 未开始 | Python 配置通过 restart 生效；热词 TXT 保留热重载 |
+| `capswriterd` 控制器 | 已完成 | `capswriterd.py` 实现；PID 锁文件、监控循环、先停 client 再停 server、接入日志系统 |
+| `capswriter` CLI | 已完成 | `capswriter.py` 实现；install/start/stop/restart/status/doctor/remap 子命令全部可用 |
+| launchd 自启动 | 已完成 | `capswriter install` 生成 plist 并 launchctl load；`capswriter uninstall` 注销 |
+| 配置入口整理 | 已完成 | `llm_enabled=False` 禁用 macOS LLM；Python 配置通过 `capswriter restart` 生效 |
 
 ---
 
