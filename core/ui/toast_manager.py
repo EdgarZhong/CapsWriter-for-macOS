@@ -121,6 +121,11 @@ class ToastMessageManager:
         self.active_windows: List = []  # 运行时类型，避免循环导入
         self.root: Optional[tk.Tk] = None
 
+        # macOS 不支持在非主线程创建 NSWindow，整个 Tkinter 主循环跳过
+        import platform
+        if platform.system() == 'Darwin':
+            return
+
         # 在子线程中启动 Tkinter
         self.manager_thread = threading.Thread(
             target=self._run_manager,

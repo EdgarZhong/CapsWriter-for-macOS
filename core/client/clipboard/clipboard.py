@@ -14,7 +14,6 @@ import subprocess
 from contextlib import contextmanager
 from typing import Optional
 import pyclip
-from pynput import keyboard
 from . import logger
 
 
@@ -179,21 +178,40 @@ async def paste_text(text: str, restore_clipboard: bool = True):
     safe_copy(text)
     logger.debug(f"已复制文本到剪贴板，长度: {len(text)}")
 
-    # 粘贴结果（使用 pynput 模拟 Ctrl+V）
-    controller = keyboard.Controller()
+    # macOS 下 pbcopy 是子进程，给一点时间让剪贴板内容落定
     if platform.system() == 'Darwin':
-        # macOS: Command+V
-        with controller.pressed(keyboard.Key.cmd):
-            controller.tap('v')
-    else:
-        # Windows/Linux: Ctrl+V
-        with controller.pressed(keyboard.Key.ctrl):
-            controller.tap('v')
-    
-    logger.debug("已发送粘贴命令 (Ctrl+V)")
+        await asyncio.sleep(0.05)
 
-    # 还原剪贴板
-    if restore_clipboard and original is not None:
+    # 粘贴结果
+    if platform.system() == 'Darwin':
+        # macOS: 用 osascript 注入 Cmd+V，pynput 模拟的按键在新版 macOS 不被前台应用接受
+        result = subprocess.run(
+            ['osascript', '-e', 'tell application "System Events" to keystroke "v" using command down'],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode().strip()
+            if '1002' in stderr or 'not allowed' in stderr.lower() or '不允许' in stderr:
+                logger.warning(
+                    "自动粘贴失败（缺少辅助功能权限）。"
+                    "请前往：系统设置 → 隐私与安全性 → 辅助功能 → 添加运行 client 的终端 app，"
+                    "然后重启 client。识别结果已写入剪贴板，可手动 Cmd+V 粘贴。"
+                )
+            else:
+                logger.warning(f"osascript 粘贴失败: {stderr}")
+    else:
+        # Windows/Linux: pynput 模拟 Ctrl+V
+        from pynput import keyboard as _kb
+        controller = _kb.Controller()
+        with controller.pressed(_kb.Key.ctrl):
+            controller.tap('v')
+
+    logger.debug("已发送粘贴命令")
+
+    # macOS 下不恢复剪贴板：识别结果应保留在剪贴板，
+    # 让用户在 osascript 粘贴失败时仍可手动 Cmd+V 或通过 Maccy 等工具回看。
+    if restore_clipboard and original is not None and platform.system() != 'Darwin':
         await asyncio.sleep(0.1)
         if safe_copy(original):
             logger.debug("剪贴板已恢复")

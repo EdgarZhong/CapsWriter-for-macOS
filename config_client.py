@@ -29,7 +29,7 @@ class ClientConfig:
             'type': 'mouse',
             'suppress': True,
             'hold_mode': True,
-            'enabled': True
+            'enabled': False
         },
     ]
 

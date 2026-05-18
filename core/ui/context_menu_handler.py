@@ -35,6 +35,12 @@ def on_edit_context():
     """
     处理"编辑上下文"菜单点击
     """
+    import platform
+    if platform.system() == 'Darwin':
+        # macOS 初版不启动任何 GUI；提示用户手动编辑配置文件
+        console.print("[yellow]macOS 暂不支持图形化上下文编辑器，请直接修改 config_client.py 中的 context 字段后重启。[/yellow]")
+        return
+
     try:
         # 获取对话框管理器并显示对话框
         manager = get_dialog_manager()
@@ -73,6 +79,11 @@ class _ContextDialogManager:
         self.result_queue: queue.Queue = queue.Queue()
         self.root: Optional[tk.Tk] = None
         self.is_running = False
+
+        # macOS 不启动 Tkinter 线程；on_edit_context() 层面已有 Darwin no-op
+        import platform
+        if platform.system() == 'Darwin':
+            return
 
         # 在独立线程中启动 Tkinter
         self.tk_thread = threading.Thread(

@@ -71,6 +71,12 @@ def toast(
         window_type: 窗口类型 ('text' 或 'label')
         markdown: 是否启用 Markdown 渲染
     """
+    import platform
+    if platform.system() == 'Darwin':
+        # macOS 初版不启动任何 GUI，toast 静默丢弃
+        logger.debug("[toast] macOS no-op: %s", text[:50])
+        return
+
     manager = ToastMessageManager()
     msg = ToastMessage(
         text=text,

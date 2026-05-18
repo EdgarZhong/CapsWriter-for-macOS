@@ -112,6 +112,10 @@ class MacOSCapsSupervisor:
             env=self._build_child_env(),
         )
 
+        # 子进程 PID 已知后补写状态文件，供 remap restore CLI 做运行检测
+        self.remap_session.update_child_pid(self.child.pid)
+        logger.info("[caps-supervisor] child pid=%s", self.child.pid)
+
         try:
             return self.child.wait()
         finally:

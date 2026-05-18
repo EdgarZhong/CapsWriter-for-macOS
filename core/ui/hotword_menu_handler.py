@@ -34,6 +34,12 @@ def on_add_hotword():
     """
     处理"添加热词"菜单点击
     """
+    import platform
+    if platform.system() == 'Darwin':
+        # macOS 初版不启动任何 GUI；提示用户直接编辑 TXT 热词文件
+        console.print("[yellow]macOS 暂不支持图形化热词编辑器，请直接编辑 hot-txt/ 目录下的热词 TXT 文件，保存后自动生效。[/yellow]")
+        return
+
     try:
         # 获取对话框管理器并显示对话框
         manager = get_dialog_manager()
@@ -100,6 +106,11 @@ class _HotwordDialogManager:
         self.result_queue: queue.Queue = queue.Queue()
         self.root: Optional[tk.Tk] = None
         self.is_running = False
+
+        # macOS 不启动 Tkinter 线程；on_add_hotword() 层面已有 Darwin no-op
+        import platform
+        if platform.system() == 'Darwin':
+            return
 
         # 在独立线程中启动 Tkinter
         self.tk_thread = threading.Thread(

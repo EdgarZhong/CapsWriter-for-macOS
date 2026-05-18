@@ -14,7 +14,7 @@ from config_client import ClientConfig as Config
 
 from . import logger
 from .macos_caps_controller import MacOSCapsController
-from .macos_caps_synth import synthesize_caps_lock_toggle
+from .macos_caps_state import toggle_caps_lock_state
 from .macos_f18_listener import MacOSF18Listener
 
 
@@ -62,5 +62,15 @@ class MacOSCapsF18Bridge:
 
     @staticmethod
     def _toggle_caps_lock() -> None:
-        """短按路径通过合成 `Caps Lock` 保留系统切换语义。"""
-        synthesize_caps_lock_toggle(Config.macos_caps_synth_caps_hold_ms)
+        """
+        短按路径：通过 IOKit 直接切换 Caps Lock 状态。
+
+        为什么不能用 CGEventPost 合成 Caps Lock 事件？
+          hidutil remap 在 HID 状态机之前拦截了 keycode，物理按键不会触发
+          Caps Lock 状态切换；CGEventPost 合成的键盘事件同样无法触发状态机。
+
+        IOKit 的 IOHIDSetModifierLockState 直接修改 HID 系统内部状态，
+        绕开事件管道，不受 remap 影响，也不需要 Accessibility 权限。
+        """
+        logger.info("[caps-f18-bridge] short press: toggling CapsLock via IOKit")
+        toggle_caps_lock_state()
