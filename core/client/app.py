@@ -77,12 +77,14 @@ class CapsWriterClient:
         self.shortcut = ShortcutManager(self, [Shortcut(**sc) for sc in Config.shortcuts])
         self.udp = UDPController(self.shortcut)
         self.macos_caps_bridge: Optional[MacOSCapsF18Bridge] = None
+        self.remap_session = None  # macOS remap 生命周期由 client 自身持有
 
-        # macOS 新方案把物理 Caps Lock 在客户端运行期间临时映射成 F18，
-        # 这里仅负责在应用内部建立“F18 语义 -> 录音状态机”的桥接。
         if system() == 'Darwin' and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18':
             from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
+            from .shortcut.macos_caps_remap import MacOSCapsRemapSession
 
+            # client 是 Caps Lock → F18 remap 的唯一生命周期 owner
+            self.remap_session = MacOSCapsRemapSession()
             self.macos_caps_bridge = MacOSCapsF18Bridge(self)
 
         # 内存清理
@@ -107,6 +109,12 @@ class CapsWriterClient:
         # 1. 停止核心运行组件
         self.udp.stop()
         self.stop_platform_shortcut_bridge()
+        # F18Bridge 停止后再恢复 remap，保证不会收到残留 F18 事件
+        if self.remap_session is not None:
+            try:
+                self.remap_session.restore()
+            except Exception as e:
+                logger.warning("remap restore failed: %s", e)
         self.shortcut.stop()
         self.stream.stop()
 

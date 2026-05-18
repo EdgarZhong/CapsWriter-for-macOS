@@ -39,6 +39,9 @@ class MicRunner:
         else:
             logger.info("当前平台采用按需开流策略，客户端空闲时不预先占用麦克风")
         self.app.shortcut.start()
+        # remap 必须在 F18Bridge 启动前建立，否则 Caps Lock 事件不会变成 F18
+        if self.app.remap_session is not None:
+            self.app.remap_session.start()
         self.app.start_platform_shortcut_bridge()
         
         # 4. 开启 UDP 控制 (如果启用)

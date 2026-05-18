@@ -130,12 +130,6 @@ class CapsWriterDaemon:
             return str(venv_python)
         return sys.executable
 
-    def _child_env(self) -> dict:
-        """子进程环境变量：注入标记，防止 start_client.py 再次进入 supervisor。"""
-        env = os.environ.copy()
-        env['CAPSWRITER_MACOS_SUPERVISOR_CHILD'] = '1'
-        return env
-
     def _start_server(self) -> subprocess.Popen:
         cmd = [self._python(), str(PROJECT_ROOT / 'start_server.py')]
         logger.info("[capswriterd] 启动 server: %s", cmd)
@@ -144,7 +138,7 @@ class CapsWriterDaemon:
     def _start_client(self) -> subprocess.Popen:
         cmd = [self._python(), str(PROJECT_ROOT / 'start_client.py')]
         logger.info("[capswriterd] 启动 client: %s", cmd)
-        return subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=self._child_env())
+        return subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
 
     # ------------------------------------------------------------------
     # 停止子进程
