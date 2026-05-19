@@ -18,7 +18,7 @@ from . import logger
 
 
 class MacOSCapsController:
-    """负责把 F18 的 down / up 事件翻译成短按切换与长按录音。"""
+    """负责把 F18 / Caps Lock 的 down / up 事件翻译成短按切换与长按录音。"""
 
     def __init__(
         self,
@@ -26,11 +26,18 @@ class MacOSCapsController:
         stop_recording: Callable[[], None],
         toggle_caps_lock: Callable[[], None],
         hold_threshold_ms: int = 200,
+        direct_caps_mode: bool = False,
     ) -> None:
         self._start_recording = start_recording
         self._stop_recording = stop_recording
         self._toggle_caps_lock = toggle_caps_lock
         self._hold_threshold_s = hold_threshold_ms / 1000.0
+
+        # 直接 Caps Lock 监听模式（CGEventTap 不可用时的降级）：
+        #   - 短按：macOS 已在 keyDown 时切换 Caps 状态，无需再调 IOKit
+        #   - 长按：macOS 也在 keyDown 时切了状态，需在录音开始前用 IOKit 撤销
+        # 该属性可在运行时由 on_tap_failed 回调设置
+        self.direct_caps_mode: bool = direct_caps_mode
 
         self._lock = threading.RLock()
         self._is_down = False
@@ -93,8 +100,13 @@ class MacOSCapsController:
             self._stop_recording()
 
         if should_toggle_caps:
-            logger.info("[caps-controller] short tap, synthesize CapsLock")
-            self._toggle_caps_lock()
+            if self.direct_caps_mode:
+                # 直接监听 Caps Lock 时，macOS 已在 keyDown 时完成了状态切换，
+                # 此处无需再调 IOKit，否则会双重切换导致状态不变
+                logger.info("[caps-controller] short tap (direct caps mode, macOS handled state toggle)")
+            else:
+                logger.info("[caps-controller] short tap, synthesize CapsLock")
+                self._toggle_caps_lock()
 
     def _on_hold_threshold(self) -> None:
         """达到长按阈值后正式启动录音。"""
@@ -105,4 +117,11 @@ class MacOSCapsController:
             self._recording_started = True
 
         logger.info("[caps-controller] hold threshold reached, start recording")
+
+        if self.direct_caps_mode:
+            # 直接监听 Caps Lock 时，macOS 在 keyDown 时已切换了 Caps 状态。
+            # 长按应触发录音而不是切换状态，用 IOKit 将状态恢复到按下前的值。
+            logger.info("[caps-controller] direct caps mode: undoing macOS state toggle before recording")
+            self._toggle_caps_lock()
+
         self._start_recording()

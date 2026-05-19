@@ -23,15 +23,16 @@ class MacOSCapsF18Bridge:
 
     def __init__(self, app) -> None:
         self.app = app
-        self._listener = MacOSF18Listener(
-            on_down=self._on_down,
-            on_up=self._on_up,
-        )
         self._controller = MacOSCapsController(
             start_recording=self._start_recording,
             stop_recording=self._stop_recording,
             toggle_caps_lock=self._toggle_caps_lock,
             hold_threshold_ms=Config.macos_caps_hold_threshold_ms,
+        )
+        self._listener = MacOSF18Listener(
+            on_down=self._on_down,
+            on_up=self._on_up,
+            on_tap_failed=self._handle_tap_failed,
         )
 
     def start(self) -> None:
@@ -44,12 +45,35 @@ class MacOSCapsF18Bridge:
         logger.info("macOS Caps F18 bridge stopping")
         self._listener.stop()
 
+    def _handle_tap_failed(self) -> None:
+        """
+        CGEventTap 创建失败时的回调。
+
+        执行顺序：
+        1. 恢复 hidutil remap（Caps Lock 不再映射到 F18，停止波浪线透传）
+        2. 把 controller 切换到 direct_caps_mode（短按跳过 IOKit 切换，
+           长按在录音前用 IOKit 撤销 macOS 的自动状态切换）
+        """
+        logger.warning(
+            "[caps-f18-bridge] CGEventTap 不可用（缺少 Accessibility 权限）。"
+            "正在恢复 hidutil remap 并切换到 Caps Lock 直接监听模式。"
+            "请前往 系统设置 → 隐私与安全性 → 辅助功能，"
+            "将运行 client 的 Python 或终端 App 添加到列表后重启 client。"
+        )
+        if self.app.remap_session is not None:
+            try:
+                self.app.remap_session.restore()
+            except Exception as e:
+                logger.warning("[caps-f18-bridge] remap restore failed: %s", e)
+        # 切换控制器到直接 Caps Lock 模式
+        self._controller.direct_caps_mode = True
+
     def _on_down(self) -> None:
-        """把 F18 down 转交给短按/长按控制器。"""
+        """把 F18 / Caps Lock down 转交给短按/长按控制器。"""
         self._controller.on_f18_down()
 
     def _on_up(self) -> None:
-        """把 F18 up 转交给短按/长按控制器。"""
+        """把 F18 / Caps Lock up 转交给短按/长按控制器。"""
         self._controller.on_f18_up()
 
     def _start_recording(self) -> None:
