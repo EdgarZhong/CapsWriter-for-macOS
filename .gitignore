@@ -149,8 +149,13 @@ cython_debug/
 
 # --- 本项目特定忽略 ---
 
-# 模型文件（体积巨大，只保留下载链接）
-models/*/*/
+# 模型权重文件（体积巨大，只保留目录占位符和下载链接）
+models/**/*.safetensors
+models/**/*.gguf
+models/**/*.onnx
+models/**/*.bin
+models/**/*.npz
+models/**/.cache/
 models/*.py
 
 # 日志与按年归档的文件夹（如 2026/01/...）
