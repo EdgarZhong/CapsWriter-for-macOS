@@ -69,8 +69,40 @@ _nsapp = NSApplication.sharedApplication()
 _nsapp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 
+def _start_client_thread() -> None:
+    """启动 CapsWriterClient 子线程。"""
+    t = threading.Thread(target=_run_client, name="CapsWriterClientThread", daemon=True)
+    t.start()
+
+
 class _AppDelegate(NSObject):
     """NSApplication 代理，处理应用生命周期事件。"""
+
+    def applicationDidFinishLaunching_(self, notification):
+        """启动完成后：先通过 AVFoundation 确保麦克风权限已处理，再启动客户端。
+        PortAudio/sounddevice 直接调 CoreAudio，不会触发 TCC 弹窗；
+        必须走 AVFoundation API 才能让 macOS 弹出授权对话框。
+        """
+        try:
+            import AVFoundation as _avf
+            status = _avf.AVCaptureDevice.authorizationStatusForMediaType_(
+                _avf.AVMediaTypeAudio
+            )
+            # AVAuthorizationStatusNotDetermined = 0：尚未询问，弹窗请求
+            if status == 0:
+                def _on_mic_permission(granted):
+                    if not granted:
+                        print("[CapsWriter.app] 麦克风权限被用户拒绝", file=sys.stderr)
+                    _start_client_thread()
+                _avf.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                    _avf.AVMediaTypeAudio, _on_mic_permission
+                )
+                return  # 等待用户响应后由回调启动客户端
+        except Exception as e:
+            print(f"[CapsWriter.app] AVFoundation 权限请求失败，直接启动: {e}", file=sys.stderr)
+
+        # 权限已确定（授权/拒绝/受限）或 AVFoundation 不可用，直接启动
+        _start_client_thread()
 
     def applicationWillTerminate_(self, notification):
         """NSApplication 即将退出时的清理回调。"""
@@ -163,13 +195,7 @@ def main() -> int:
     delegate = _AppDelegate.alloc().init()
     _nsapp.setDelegate_(delegate)
 
-    # 在子线程启动客户端
-    client_thread = threading.Thread(
-        target=_run_client,
-        name="CapsWriterClientThread",
-        daemon=True,
-    )
-    client_thread.start()
+    # 客户端线程由 applicationDidFinishLaunching_ 在确认麦克风权限后启动
 
     # 主线程运行 NSApplication RunLoop（阻塞）
     from PyObjCTools import AppHelper

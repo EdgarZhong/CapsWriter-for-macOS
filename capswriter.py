@@ -298,25 +298,38 @@ def cmd_doctor(args) -> int:
     else:
         issues.append(f"未找到 capswriterd.py")
 
-    # 3. 检查辅助功能权限（Accessibility）
-    result = subprocess.run(
-        ['osascript', '-e',
-         'tell application "System Events" to get name of processes'],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        ok.append("辅助功能（Accessibility）权限：已授权（自动粘贴可用）")
+    # 3. 检查辅助功能权限（Accessibility）—— CGEventTap 是否可创建
+    import Quartz as _Quartz
+    _acc_ok = False
+    try:
+        _mask = _Quartz.CGEventMaskBit(_Quartz.kCGEventKeyDown)
+        _test_tap = _Quartz.CGEventTapCreate(
+            _Quartz.kCGHIDEventTap, _Quartz.kCGHeadInsertEventTap,
+            _Quartz.kCGEventTapOptionDefault, _mask, lambda *a: a[2], None,
+        )
+        if _test_tap is not None:
+            _Quartz.CGEventTapEnable(_test_tap, False)
+            _acc_ok = True
+    except Exception:
+        pass
+
+    if _acc_ok:
+        ok.append("辅助功能（Accessibility）权限：已授权，CGEventTap 可用")
     else:
         issues.append(
-            "辅助功能（Accessibility）权限：未授权\n"
-            "  → 前往：系统设置 → 隐私与安全性 → 辅助功能\n"
-            "  → 添加运行 start_client.py 的终端 app\n"
-            "  → 无此权限时识别结果仍会写入剪贴板，但无法自动粘贴上屏"
+            "辅助功能（Accessibility）权限：未授权（CGEventTap 创建失败）\n"
+            "  → 即将自动打开：系统设置 → 隐私与安全性 → 辅助功能\n"
+            "  → 找到 CapsWriter，关闭后重新打开开关（或删除重新添加）\n"
+            "  → 修复后运行 capswriter restart"
         )
+        subprocess.Popen([
+            'open',
+            'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+        ])
 
     # 4. 检查 Input Monitoring 权限（通过 pynput 间接检测）
     #    无法直接 API 查询，只能提示用户确认
-    ok.append("输入监控（Input Monitoring）权限：请手动确认（pynput F18 监听需要）")
+    ok.append("输入监控（Input Monitoring）权限：请手动确认")
 
     # 5. 检查 server 端口可达性
     import socket

@@ -10,6 +10,9 @@ macOS `Caps Lock -> F18` 业务桥接器。
 
 from __future__ import annotations
 
+import subprocess
+import threading
+
 from config_client import ClientConfig as Config
 
 from . import logger
@@ -34,6 +37,8 @@ class MacOSCapsF18Bridge:
             on_up=self._on_up,
             on_tap_failed=self._handle_tap_failed,
         )
+        self._recover_lock = threading.Lock()
+        self._recovering = False  # 防止并发触发多个恢复循环
 
     def start(self) -> None:
         """启动 F18 监听。"""
@@ -46,27 +51,59 @@ class MacOSCapsF18Bridge:
         self._listener.stop()
 
     def _handle_tap_failed(self) -> None:
-        """
-        CGEventTap 创建失败时的回调。
+        """CGEventTap 失效（启动失败或运行时被 TCC 撤销）的统一处理。"""
+        with self._recover_lock:
+            if self._recovering:
+                return  # 恢复循环已在运行，不重复触发
+            self._recovering = True
 
-        执行顺序：
-        1. 恢复 hidutil remap（Caps Lock 不再映射到 F18，停止波浪线透传）
-        2. 把 controller 切换到 direct_caps_mode（短按跳过 IOKit 切换，
-           长按在录音前用 IOKit 撤销 macOS 的自动状态切换）
-        """
-        logger.warning(
-            "[caps-f18-bridge] CGEventTap 不可用（缺少 Accessibility 权限）。"
-            "正在恢复 hidutil remap 并切换到 Caps Lock 直接监听模式。"
-            "请前往 系统设置 → 隐私与安全性 → 辅助功能，"
-            "将运行 client 的 Python 或终端 App 添加到列表后重启 client。"
-        )
+        logger.warning("[caps-f18-bridge] CGEventTap 失效，开始恢复流程")
+
+        # 1. 恢复 hidutil remap（Caps Lock 不再映射到 F18）
         if self.app.remap_session is not None:
             try:
                 self.app.remap_session.restore()
             except Exception as e:
                 logger.warning("[caps-f18-bridge] remap restore failed: %s", e)
-        # 切换控制器到直接 Caps Lock 模式
-        self._controller.direct_caps_mode = True
+
+        # 2. 系统通知 + 自动打开辅助功能设置，引导用户授权
+        subprocess.Popen(
+            ['osascript', '-e',
+             'display notification "请在弹出的设置中重新授权 CapsWriter，授权后将自动恢复" '
+             'with title "CapsWriter 需要辅助功能权限"'],
+        )
+        subprocess.Popen([
+            'open',
+            'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+        ])
+
+        # 3. 后台恢复循环：每10秒重试，权限恢复后自动重建 tap + remap
+        threading.Thread(
+            target=self._recovery_loop,
+            daemon=True,
+            name="TapRecoveryThread",
+        ).start()
+
+    def _recovery_loop(self) -> None:
+        """后台轮询重建 CGEventTap，成功后恢复 remap 并通知用户。"""
+        import time
+        logger.info("[caps-f18-bridge] 开始自动恢复循环（每10秒重试 CGEventTap）")
+        while True:
+            time.sleep(10)
+            if self._listener.restart():
+                logger.info("[caps-f18-bridge] CGEventTap 已恢复，重新启用 remap")
+                if self.app.remap_session is not None:
+                    try:
+                        self.app.remap_session.start()
+                    except Exception as e:
+                        logger.warning("[caps-f18-bridge] remap re-enable failed: %s", e)
+                subprocess.Popen(
+                    ['osascript', '-e',
+                     'display notification "Caps Lock 录音功能已自动恢复" with title "CapsWriter"'],
+                )
+                with self._recover_lock:
+                    self._recovering = False
+                break
 
     def _on_down(self) -> None:
         """把 F18 / Caps Lock down 转交给短按/长按控制器。"""
