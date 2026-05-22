@@ -156,6 +156,7 @@ capswriter CLI
 | 终端出现 `^[[32~` | pynput 改为 Quartz CGEventTap 主动吞事件 |
 | F18 Bridge 无事件（remap ownership 错位） | remap 移入 client 自身管理，supervisor 从启动链路移除 |
 | `.app` 启动失败 -10669 | macOS 26 的 Launch Services 不再允许 shell 脚本作为 CFBundleExecutable；改为编译 Mach-O C 启动器（`clang launcher.c`）解决 |
+| 极短录音后无响应（死锁） | `stream.close()` 在录音时间 <300ms 时可在 macOS 卡死，同时持有 `_session_lock`，导致后续所有按键等锁；改为带 5s 超时的后台线程调用，超时后放弃，进程自动恢复 |
 
 ---
 

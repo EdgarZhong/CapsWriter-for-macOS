@@ -251,18 +251,28 @@ class AudioStreamManager:
         """停止音频流"""
         if not self._running:
             return
-            
+
         self._running = False  # 标记为停止
         self._recording_session_count = 0
-        if self.state.stream is not None:
-            try:
-                self.state.stream.close()
+        stream = self.state.stream
+        self.state.stream = None  # 立即清除引用，允许新录音会话判断流已不可用
+        if stream is not None:
+            # sounddevice.InputStream.close() 在录音时间极短时可能在 macOS 上卡死（PortAudio 已知问题）。
+            # 用带 5s 超时的后台线程执行，超时后放弃等待，避免持有 _session_lock 导致后续按键全部无响应。
+            def _close():
+                try:
+                    stream.close()
+                except Exception as e:
+                    logger.debug(f"停止音频流时发生错误: {e}")
+
+            t = threading.Thread(target=_close, daemon=True)
+            t.start()
+            t.join(timeout=5.0)
+            if t.is_alive():
+                logger.warning("[audio] stream.close() 超时（5s），已放弃等待，PortAudio 流将在后台自行结束")
+            else:
                 logger.info("[audio] stream close")
                 logger.debug("音频流已停止")
-            except Exception as e:
-                logger.debug(f"停止音频流时发生错误: {e}")
-            finally:
-                self.state.stream = None
     
     def reopen(self) -> Optional[sd.InputStream]:
         """
