@@ -114,9 +114,16 @@ def _wait_server_ready(host: str = '127.0.0.1', port: int = 6016,
 class CapsWriterDaemon:
     """管理 server / client 子进程的单例守护进程。"""
 
+    # client PID 文件（macOS .app 模式下由 start_client_macos.py 写入）
+    CLIENT_PID_FILE = STATE_DIR / 'client.pid'
+
     def __init__(self) -> None:
         self.server: Optional[subprocess.Popen] = None
+        # macOS .app 模式：client 指向 `open -W` 的 Popen（用于检测退出）
+        # 普通模式：client 指向 Python 子进程的 Popen
         self.client: Optional[subprocess.Popen] = None
+        # macOS .app 模式下，实际 client Python 进程的 PID（用于发送 SIGTERM）
+        self._client_pid: Optional[int] = None
         self._stopping = False
 
     # ------------------------------------------------------------------
@@ -136,16 +143,83 @@ class CapsWriterDaemon:
         return subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
 
     def _start_client(self) -> subprocess.Popen:
+        app_path = PROJECT_ROOT / 'CapsWriter.app'
+        if app_path.exists() and sys.platform == 'darwin':
+            return self._start_client_app(app_path)
+        # 非 macOS 或 .app 不存在时回退到直接启动
         cmd = [self._python(), str(PROJECT_ROOT / 'start_client.py')]
         logger.info("[capswriterd] 启动 client: %s", cmd)
         return subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
+
+    def _start_client_app(self, app_path: Path) -> subprocess.Popen:
+        """通过 macOS `open` 命令启动 CapsWriter.app，赋予 client GUI 应用身份。"""
+        cmd = ['open', '-W', '-n', str(app_path)]
+        logger.info("[capswriterd] 启动 client (.app): %s", cmd)
+        proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
+
+        # 等待 client 写入 PID 文件（最多 10 秒）
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            pid = self._read_client_pid()
+            if pid is not None and is_running(pid):
+                self._client_pid = pid
+                logger.info("[capswriterd] client .app 实际 PID=%s", pid)
+                return proc
+            time.sleep(0.5)
+
+        logger.warning("[capswriterd] 未能在 10s 内读取到 client PID 文件")
+        return proc
+
+    def _read_client_pid(self) -> Optional[int]:
+        """读取 client PID 文件。"""
+        try:
+            return int(self.CLIENT_PID_FILE.read_text().strip())
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # 停止子进程
     # ------------------------------------------------------------------
 
+    def _stop_client(self, wait: float = 8.0) -> None:
+        """停止 client 进程（适配 .app 和普通模式）。"""
+        # macOS .app 模式：向实际 client Python 进程发送 SIGTERM
+        if self._client_pid is not None:
+            logger.info("[capswriterd] 停止 client (pid=%s, .app 模式)", self._client_pid)
+            try:
+                os.kill(self._client_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                logger.info("[capswriterd] client pid=%s 已不存在", self._client_pid)
+                return
+            except Exception as exc:
+                logger.warning("[capswriterd] 向 client pid=%s 发送 SIGTERM 失败: %s",
+                               self._client_pid, exc)
+                return
+
+            # 等待 client 退出
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                if not is_running(self._client_pid):
+                    logger.info("[capswriterd] client 已退出")
+                    self._client_pid = None
+                    return
+                time.sleep(0.3)
+
+            # 超时强制 kill
+            logger.warning("[capswriterd] client 未在 %.0fs 内退出，强制 kill", wait)
+            try:
+                os.kill(self._client_pid, signal.SIGKILL)
+            except Exception:
+                pass
+            self._client_pid = None
+            return
+
+        # 普通模式：使用 Popen.terminate()
+        self._stop_process(self.client, 'client', wait)
+
     def _stop_process(self, proc: Optional[subprocess.Popen], name: str,
                       wait: float = 8.0) -> None:
+        """停止普通子进程（server 或非 .app 模式的 client）。"""
         if proc is None or proc.poll() is not None:
             return
         logger.info("[capswriterd] 停止 %s (pid=%s)", name, proc.pid)
@@ -168,7 +242,7 @@ class CapsWriterDaemon:
             return
         self._stopping = True
         logger.info("[capswriterd] 正在关闭 ...")
-        self._stop_process(self.client, 'client')
+        self._stop_client()
         self._stop_process(self.server, 'server')
         logger.info("[capswriterd] 已关闭")
 
@@ -220,7 +294,12 @@ class CapsWriterDaemon:
                 time.sleep(2)
 
                 server_dead = self.server.poll() is not None
-                client_dead = self.client.poll() is not None
+
+                # client 存活检测：.app 模式看实际 PID，普通模式看 Popen
+                if self._client_pid is not None:
+                    client_dead = not is_running(self._client_pid)
+                else:
+                    client_dead = self.client.poll() is not None
 
                 if server_dead:
                     code = self.server.returncode
@@ -229,8 +308,7 @@ class CapsWriterDaemon:
                     return 2
 
                 if client_dead:
-                    code = self.client.returncode
-                    logger.warning("[capswriterd] client 意外退出 (code=%s)，关闭 server", code)
+                    logger.warning("[capswriterd] client 意外退出，关闭 server")
                     self._shutdown()
                     return 3
 

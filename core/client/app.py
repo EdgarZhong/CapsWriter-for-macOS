@@ -141,15 +141,20 @@ class CapsWriterClient:
         console.print('[green4]再见！')
 
 
-    def start(self):
+    def start(self, register_signals: bool = True):
         """
         启动客户端 (唯一入口)
-        
+
         自动根据命令行参数识别模式。内部管理异步循环。
+
+        Args:
+            register_signals: 是否注册信号处理。macOS .app 入口在主线程
+                自行处理信号，子线程不可调用 signal.signal()，应传 False。
         """
 
-        # 注册退出函数
-        register_signal(self.stop)
+        # 注册退出函数（macOS .app 模式下由外部主线程处理）
+        if register_signals:
+            register_signal(self.stop)
 
         files = [Path(f) for f in sys.argv[1:] if os.path.exists(f)]
 

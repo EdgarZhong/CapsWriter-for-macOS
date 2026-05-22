@@ -4,7 +4,7 @@
 
 - 分支：`mac-dev`，基线：`master`
 - 目标：为 macOS / Apple Silicon 新增 `qwen_asr_mlx` 后端，在不大改现有 Client / Server 架构的前提下，实现稳定的 Caps Lock 长按录音、最终结果返回、剪贴板写入和可选自动上屏体验。
-- **当前阶段：P0/P1 全部完成，正在做集成测试收尾。**
+- **当前阶段：P0/P1 全部完成。正在推进 P2 — macOS `.app` bundle 封装与麦克风指示器。**
 
 ---
 
@@ -17,9 +17,12 @@ launchd
   └─ capswriterd
        ├─ server process
        │    └─ start_server.py / qwen_asr_mlx
-       └─ client process
-            └─ start_client.py / core.client.main
-                 └─ MacOSCapsRemapSession（client 独占 Caps remap 生命周期）
+       └─ CapsWriter.app（client 进程，具有 macOS GUI 应用身份）
+            └─ NSApplication RunLoop（主线程）
+                 └─ asyncio 事件循环（子线程）
+                      └─ core.client.main → CapsWriterClient
+                           ├─ MacOSCapsRemapSession（client 独占 Caps remap 生命周期）
+                           └─ 录音 / WebSocket / 结果处理
 ```
 
 ### 用户交互入口
@@ -74,17 +77,18 @@ server 只负责 ASR。
 capswriter CLI
   └─ capswriterd（PID 锁文件单例）
        ├─ start_server.py → qwen_asr_mlx（等待端口 6016 就绪）
-       └─ start_client.py
-            └─ core.client.main → CapsWriterClient
-                 ├─ MacOSCapsRemapSession（client 启动前保存快照，启用 Caps→F18）
-                 └─ MacOSCapsF18Bridge
-                      └─ MacOSF18Listener（Quartz CGEventTap 主动拦截，F18 不透传终端）
-                           └─ MacOSCapsController（短按/长按分发）
-                                ├─ 短按 → IOHIDSetModifierLockState 切换大小写
-                                └─ 长按 → ShortcutManager → AudioStreamManager
-                                              └─ AudioRecorder / WebSocketManager
-                                                   └─ ResultProcessor
-                                                        └─ 写剪贴板 → 尝试 osascript 粘贴一次
+       └─ CapsWriter.app（通过 open 命令启动）
+            └─ NSApplication（主线程 RunLoop，提供 macOS GUI 应用身份）
+                 └─ asyncio 子线程 → CapsWriterClient
+                      ├─ MacOSCapsRemapSession（client 启动前保存快照，启用 Caps→F18）
+                      └─ MacOSCapsF18Bridge
+                           └─ MacOSF18Listener（Quartz CGEventTap 主动拦截，F18 不透传终端）
+                                └─ MacOSCapsController（短按/长按分发）
+                                     ├─ 短按 → IOHIDSetModifierLockState 切换大小写
+                                     └─ 长按 → ShortcutManager → AudioStreamManager
+                                                   └─ AudioRecorder / WebSocketManager
+                                                        └─ ResultProcessor
+                                                             └─ 写剪贴板 → 尝试 osascript 粘贴一次
 ```
 
 ---
@@ -97,11 +101,13 @@ capswriter CLI
 | 首版结果模式 | 松开后快速返回最终结果，不做中间流式显示 |
 | 上屏策略 | 必先写剪贴板，只尝试自动粘贴一次，失败只记 warning，不重试 |
 | 权限口径 | Accessibility 权限仅用于自动粘贴；CGEventTap 也需要 Accessibility |
-| macOS GUI | 初版不要任何 GUI；tray / toast / Tkinter 弹窗全禁 |
+| macOS GUI | client 包装为 `.app` bundle（Agent App，LSUIElement=true，无 Dock 图标）；现有 Windows 专用 tray/toast/Tkinter 弹窗仍禁用 |
 | 模型优先级 | 默认 `Qwen3-ASR-1.7B-8bit`，本地回退 `1.7B-4bit` |
 | remap ownership | client 是 Caps remap 的唯一生命周期 owner |
 | remap 持久化 | client 启动前保存 original UserKeyMapping 快照，退出或手动 restore 时恢复 |
 | client 运行期 remap 规则 | client 运行时独占接管 Caps Lock -> F18；需修改键盘映射先 stop |
+| client 进程形态 | 包装为 `CapsWriter.app`（Agent App，LSUIElement=true），主线程 NSApplication RunLoop，asyncio 在子线程 |
+| client 启动方式 | capswriterd 通过 `open CapsWriter.app` 启动 client，替代直接 `python start_client.py` |
 | 总生命周期 | `capswriterd` 是整体软件单例控制器 |
 | 自启动 | 只注册 `capswriterd`（`~/Library/LaunchAgents/com.capswriter.agent.plist`） |
 | 用户入口 | `capswriter` 全局命令（`~/.local/bin/capswriter`，由 `install.sh` 注册） |
@@ -132,6 +138,11 @@ capswriter CLI
 | SIGTERM 信号修复 | ✅ 已完成 | `register_signal` 补注 SIGTERM，stop 后 client 正确恢复 remap |
 | 全局命令注册 | ✅ 已完成 | `install.sh` 写入 `~/.local/bin/capswriter` 包装脚本 |
 | `launchd install/uninstall` 端到端测试 | 🔲 待测试 | 实现已完成，需重启验证开机自启效果 |
+| **P2: `.app` bundle 封装** | ✅ 已完成 | `CapsWriter.app` 创建完毕；CFBundleExecutable 原为 shell 脚本，macOS 26 拒绝执行（-10669），已改为编译的 Mach-O C 启动器 |
+| **P2: NSApplication 集成** | ✅ 已完成 | `start_client_macos.py`：主线程 NSApplication RunLoop，asyncio 在子线程；SIGTERM/SIGINT 处理；client PID 文件写入 |
+| **P2: capswriterd 启动方式适配** | ✅ 已完成 | capswriterd 通过 `open -W -n CapsWriter.app` 启动 client，读取 PID 文件追踪 |
+| **P2: 麦克风橙色胶囊** | 🔴 进行中 | 详见下方"麦克风指示器问题分析" |
+| P3: 菜单栏状态图标（待定） | 💤 暂不实施 | 菜单栏常驻 CapsWriter 图标，录音时切换状态，点击有菜单。有了 `.app` + NSApplication 后顺手可做，但当前不是优先级 |
 
 ---
 
@@ -144,6 +155,37 @@ capswriter CLI
 | stop 后 remap 未恢复 | 补注 SIGTERM handler，client 收到 SIGTERM 后执行完整 cleanup |
 | 终端出现 `^[[32~` | pynput 改为 Quartz CGEventTap 主动吞事件 |
 | F18 Bridge 无事件（remap ownership 错位） | remap 移入 client 自身管理，supervisor 从启动链路移除 |
+| `.app` 启动失败 -10669 | macOS 26 的 Launch Services 不再允许 shell 脚本作为 CFBundleExecutable；改为编译 Mach-O C 启动器（`clang launcher.c`）解决 |
+
+---
+
+## 麦克风指示器问题分析
+
+### 现状（截至 2026-05-20）
+
+- 录音功能正常（长按 Caps Lock → 转录 → 粘贴全链路验证通过）
+- **Control Center 的麦克风指示器显示 "Python3"，而非 "CapsWriter"**
+- **录音期间菜单栏左侧未出现橙色麦克风胶囊**（macOS 26 可能已变更行为，待确认）
+
+### 根因
+
+`open -W -n CapsWriter.app` 启动 C launcher（Mach-O），随即 `execv` 把进程替换为 Python 二进制。`execv` 后进程镜像变为 Python，TCC 对不同权限类别的追踪机制不同：
+
+| TCC 类别 | 追踪机制 | 实际结果 |
+|----------|----------|----------|
+| Input Monitoring | Launch Services bundle 注册 | ✅ 显示 "CapsWriter" |
+| Microphone（CoreAudio） | 当前进程可执行文件的代码签名身份 | ❌ 显示 "Python3" |
+
+### 修复方案（待实施）
+
+**方案：内嵌 Python（替代 execv）**
+
+C launcher 不使用 `execv`，改为通过 `dlopen` 加载 `libpython3.13.dylib`，在进程内调用 `Py_RunMain()`，C binary 始终作为主进程存活，TCC 全程看到 CapsWriter 身份。
+
+可行性确认：
+- `Py_ENABLE_SHARED = 1` ✓
+- `libpython3.13.dylib` 存在于 `~/.local/share/mise/installs/python/3.13.13/lib/` ✓
+- 编译命令：`clang launcher.c -L<libdir> -lpython3.13 -rpath <libdir> -o CapsWriter.app/Contents/MacOS/CapsWriter`
 
 ---
 
@@ -151,7 +193,7 @@ capswriter CLI
 
 - `capswriter install` launchd 端到端还未测试（重启验证）。
 - launchd 环境变量与交互 shell 不同，路径已使用绝对路径，但需重启确认。
-- 后台进程无 macOS 橙点麦克风指示器（子进程无 NSApplication 身份），决定暂不处理。
+- 麦克风橙色胶囊在 macOS 26 的显示位置/行为是否有变更，需对比确认（现象：Control Center 有橙色点但菜单栏无胶囊）。
 
 ---
 
@@ -169,9 +211,10 @@ capswriter CLI
 
 ## 下一步工作
 
-| 优先级 | 任务 |
-|--------|------|
-| P1 | `capswriter install` 端到端测试（重启验证开机自启） |
-| P2 | macOS 录音状态视觉反馈（音效提示或菜单栏图标） |
-| P3 | 更完整 GUI 或菜单栏能力 |
-| P3 | 更接近 Windows 的流式上屏体验 |
+| 优先级 | 任务 | 说明 |
+|--------|------|------|
+| **P2** | **麦克风指示器显示 CapsWriter** | 改 C launcher 为内嵌 Python（libpython dlopen + Py_RunMain），不再 execv，见"麦克风指示器问题分析" |
+| **P2** | **确认 macOS 26 橙色胶囊行为** | 修复归属后，验证录音时菜单栏左侧是否出现橙色胶囊，或仅在 Control Center 显示（macOS 26 行为可能变更） |
+| P2 | `capswriter install` 端到端测试 | 需重启验证开机自启效果 |
+| P3 | 菜单栏状态图标（待定） | 常驻图标 + 录音状态切换 + 点击菜单 |
+| P3 | 更接近 Windows 的流式上屏体验 | — |

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 应用基本标识 -->
+    <key>CFBundleName</key>
+    <string>CapsWriter</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>CapsWriter</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>com.capswriter.client</string>
+
+    <key>CFBundleExecutable</key>
+    <string>CapsWriter</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <!-- Agent App: 不显示 Dock 图标，不显示应用菜单栏 -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- 后台运行：不出现在 App Switcher 和 Force Quit 列表中 -->
+    <key>LSBackgroundOnly</key>
+    <false/>
+
+    <!-- 麦克风权限描述（TCC 弹窗文案） -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>CapsWriter needs microphone access for speech recognition.</string>
+</dict>
+</plist>
