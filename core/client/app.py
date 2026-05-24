@@ -40,10 +40,14 @@ if TYPE_CHECKING:
 class CapsWriterClient:
     """
     CapsWriter 客户端门面类
-    
+
     管理的外部接口简洁：start()。
     """
-    def __init__(self):
+    def __init__(self, error_bus=None):
+        # ErrorBus 实例（可选），用于写 status.json 和发系统通知
+        # macOS .app 入口在主线程创建后注入；其他平台为 None
+        self.error_bus = error_bus
+
         # 确保正确的工作目录
         self.base_dir = Path(__file__).parents[2]
         os.chdir(self.base_dir)

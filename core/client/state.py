@@ -131,6 +131,10 @@ class ClientState:
         self.recording_start_time = start_time
         self.active_trace_id = trace_id
 
+        # 通知 ErrorBus 切换到录音状态
+        if self.app and getattr(self.app, 'error_bus', None):
+            self.app.error_bus.update(state='recording')
+
         if trace_id:
             self.trace_contexts[trace_id] = {
                 'trace_id': trace_id,
@@ -168,6 +172,12 @@ class ClientState:
         self.recording_start_time = 0.0
         self.active_trace_id = None
         logger.debug(f"录音状态已更新: recording=False, duration={duration:.2f}s")
+
+        # 通知 ErrorBus 录音结束（回到 ready 或 connecting 取决于连接状态）
+        if self.app and getattr(self.app, 'error_bus', None):
+            new_state = 'ready' if self.is_connected else 'connecting'
+            self.app.error_bus.update(state=new_state)
+
         return duration
 
     def mark_recording_finish_requested(self, trace_id: Optional[str], finish_time: float) -> None:

@@ -14,6 +14,7 @@ Fun-ASR-Nano | 放 ASR Nano
 Qwen3-ASR | 千问ASR | 千问3ASR
 Qwen3-TTS | 千问TTS | 千问3TTS
 Claude | 克劳德 | 克劳得
+CLAUDE.md | cloud.md | cloud 点 MD
 Claude Code | cloud cold | cloud code
 config_client.py | config_client 点 py | config_client
 config_server.py | config_server 点 py | config_server
@@ -27,6 +28,7 @@ TensorRT
 DirectML
 TensorFlow
 Transformer
-
+git
+git 仓库
 # ====== 自定义短语示例 ======
 

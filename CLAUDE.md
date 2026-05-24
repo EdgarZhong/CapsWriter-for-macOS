@@ -40,9 +40,9 @@ launchd
 | Accessibility 引导 | 列表有 → 点「-」删除；没有 → 等自动出现；不引导点「+」；osascript 弹窗只弹一次；15s 重试 |
 | 连接状态通知 | 每次 WebSocket 状态变化发系统通知，冷启动第一次也通知 |
 | 用户心智 | 运维层透明（只操作 CapsWriter 整体）；故障层用「识别引擎」指代 server |
-| 菜单栏 GUI | 待机灰色 mic / 录音橙色 mic.fill；点击只有 Quit；无其他 UI |
+| 菜单栏 GUI | 静态 `waveform`（SF Symbols，灰色，不随状态变化）；菜单项：📋 复制最近结果 / ✨ 编辑热词（open hot.txt）/ Quit；LLM 相关菜单项推后；不用 mic/mic.fill（与麦克风胶囊重合） |
 | 显示名称 | `CapsWriter for macOS` |
-| 信号处理 | SIGTERM 立即 cleanup（恢复 remap）；SIGINT 双击确认 |
+| 信号处理 | SIGTERM：set_wakeup_fd + SigtermWatcher 守护线程（NSApp.run() C RunLoop 期间 Python signal handler 无法执行）→ _critical_cleanup() → os._exit(0)；SIGINT 双击确认 |
 
 ---
 
@@ -55,12 +55,13 @@ launchd
 | .app bundle + launcher_embed | ✅ | Mach-O C 启动器，hardened runtime，麦克风胶囊显示 CapsWriter |
 | AVFoundation 权限弹窗 | ✅ | 首次启动弹出麦克风授权对话框 |
 | CGEventTap 失效恢复框架 | ✅ | 通知用户 + 打开设置 + 每 10s 重试；已消除 pynput 降级 |
-| capswriter CLI | ✅ | install/start/stop/restart/status/doctor/help/remap 可用 |
-| **P0：client 38s 后崩溃** | 🔴 待诊断 | 连接 server 约 38s 后意外退出，无 traceback；最可疑：AVFoundation 回调线程或恢复循环新代码 |
-| **P1：架构重构（废弃 capswriterd）** | 🔴 待实施 | 两个独立 launchd plist；server 生命周期自管理；capswriter CLI 改走 launchctl |
-| **P1：ErrorBus + status.json** | 🔴 待实施 | 统一内部报错出口；status.json 心跳写入；CLI start/status/doctor 对齐 |
-| **P1：Accessibility 引导优化** | 🔴 待实施 | osascript 分支对话框；15s 重试；CLI 持续输出 |
-| **P2.5：菜单栏图标** | 🔲 待实施 | SF Symbols mic/mic.fill；状态切换；Quit 菜单项；icon.ico → icns |
+| **M1：launchd 双 plist 架构** | ✅ | capswriterd 归档；两个独立 plist；capswriter CLI 改走 launchctl；start_server.py 加 SIGTERM→exit 0 |
+| **M2：server 60s 自退出** | ✅ | `_watch_connections()` 后台协程；首次有连接后开始监控；断连 60s 则 app.stop()+os._exit(0) |
+| **M3：ErrorBus + status.json** | ✅ | `ErrorBus` 类；状态变化时写入；5s 心跳；退出删除；连接/录音状态已接入；traceback 补全 |
+| **M4：CLI 改进** | ✅ | `start` 阻塞轮询 status.json 等 ready；`status` 读 status.json 展示完整快照 |
+| **M5：Accessibility 引导优化** | ✅ | osascript 分支弹窗（只弹一次）；15s 重试；ErrorBus wire accessibility_ok；CLI start 超时有具体提示 |
+| **SIGTERM 修复** | ✅ | set_wakeup_fd + SigtermWatcher 守护线程；_critical_cleanup() + os._exit(0)；capswriter stop 现可在几秒内干净退出 |
+| **M6：菜单栏图标** | 🔲 待实施 | 静态 `waveform`（SF Symbols，不随状态变化，避免与麦克风胶囊重合）；菜单项：📋 复制最近结果 / ✨ 编辑热词（open hot.txt）/ Quit；LLM 相关推后 |
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |
 | FFmpeg 路径确认 | 🔲 待确认 | launcher_embed 进程 PATH 是否含 FFmpeg |
@@ -78,11 +79,11 @@ launchd
 
 ## 下一步工作
 
-| 优先级 | 任务 |
+| 里程碑 | 任务 |
 |--------|------|
-| **P0** | 诊断 38s 崩溃：改进 `_run_client()` exception logging 输出完整 traceback；查 `~/Library/Logs/DiagnosticReports/` |
-| **P1** | 架构重构：两个 launchd plist；server 60s 自退出；CLI 改走 launchctl |
-| **P1** | ErrorBus + status.json + CLI 改进 |
-| **P1** | Accessibility 引导对话框 + 15s 重试 + CLI 持续输出 |
-| **P2.5** | 菜单栏图标 |
-| P2 | launchd 端到端测试 |
+| ✅ M1 | launchd 双 plist 架构已完成 |
+| **M2** | server 60s 自退出：`start_server.py` / server 侧监听 WebSocket 连接状态，断连 60s 后 exit 0；`capswriter stop` 发 WebSocket shutdown 信号 |
+| **M3** | ErrorBus + status.json：`~/.capswriter/state/status.json`；状态变化 + 每 5s 心跳写入；退出时删除 |
+| **M4** | CLI 改进：`start` 阻塞轮询 status.json；`status` 读状态文件；`doctor` 对齐新架构 |
+| **M5** | Accessibility 引导：osascript 分支弹窗 + 15s 重试 + CLI 持续输出 |
+| M6 | 菜单栏图标（SF Symbols mic/mic.fill）|

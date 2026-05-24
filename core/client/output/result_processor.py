@@ -154,22 +154,37 @@ class ResultProcessor:
             logger.debug(f"检测按键状态失败: {e}")
     
     async def start(self) -> None:
-        """开启工作循环（含自动重联）"""
+        """开启工作循环（含自动重联）。连接状态变化时通过 ErrorBus 更新 status.json。"""
+        eb = getattr(self.app, 'error_bus', None)
+
         while not self._exit_event.is_set():
             # 1. 尝试连接，失败则重试
             if not await self.ws.connect():
+                if eb:
+                    eb.update(state='connecting', server_connected=False)
                 await asyncio.sleep(2)
                 continue
+
+            # 连接成功：更新状态并发通知
+            if eb:
+                eb.update(state='ready', server_connected=True)
+                eb.notify("识别引擎已连接，CapsWriter 就绪", "server_connected")
 
             # 2. 消息接收循环
             while not self._exit_event.is_set():
                 try:
                     message = await self.ws.receive()
-                    if message is None: break
+                    if message is None:
+                        break
                     await self._handle_message(message)
                 except Exception as e:
                     logger.debug(f"连接异常中断: {e}")
                     break
+
+            # 连接断开：更新状态并发通知
+            if eb:
+                eb.update(state='connecting', server_connected=False)
+                eb.notify("识别引擎连接断开", "server_disconnected")
 
             console.print(f'[bold red]已断开服务端连接[/bold red]\n')
             self._cleanup()

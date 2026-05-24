@@ -53,19 +53,38 @@ class MicRunner:
         if Config.llm_enabled:
             self.app.llm.start()
 
+    async def _heartbeat_task(self) -> None:
+        """每 5s 更新 status.json 的 last_heartbeat，供 capswriter status 判断存活。"""
+        while True:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            eb = getattr(self.app, 'error_bus', None)
+            if eb:
+                eb.heartbeat()
+
     async def run(self):
         """麦克风模式主入口"""
-        
+
         logger.info("=" * 50)
         logger.info(f"CapsWriter for macOS {__version__} (麦克风模式)")
         logger.info(f"日志级别: {Config.log_level}")
-        
+
         # 1. 资源启动
         self.start_resources()
-        
-        # 2. 启动核心处理器 (内部处理连接与循环)
-        
+
+        # 2. 启动核心处理器（内部处理连接与循环）+ 并发心跳任务
         from ..output import ResultProcessor
         self.processor = ResultProcessor(self.app)
-        await self.processor.start()
+
+        heartbeat = asyncio.create_task(self._heartbeat_task())
+        try:
+            await self.processor.start()
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             
