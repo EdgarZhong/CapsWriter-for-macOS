@@ -1,5 +1,30 @@
 # 更新日志
 
+## macOS 适配版 v1.0（2026-05-24）
+
+> 本条目记录 [EdgarZhong/CapsWriter-Offline](https://github.com/EdgarZhong/CapsWriter-Offline) `mac-dev` 分支相对原版 v2.5 的 macOS 专项改动。
+
+### 新增
+
+- **Apple MLX 推理后端**：接入 `mlx-lm`，在 Apple Silicon 上原生加速 Qwen3-ASR-1.7B，松手后约 0.3～0.6 秒返回结果
+- **CGEventTap 键盘捕获**：通过 `hidutil` 将 Caps Lock 临时映射为 F18，再由 CGEventTap 捕获，实现长按录音 / 短按保留大小写切换
+- **CapsWriter.app bundle**：以 Mach-O C 启动器打包为原生 .app，录音时麦克风胶囊显示「CapsWriter」而非「Python」
+- **launchd 双服务架构**：client 和 server 各由独立 launchd plist 管理，替代原先的 `capswriterd` 守护进程方案
+- **`capswriter` CLI**：统一控制入口，支持 `start / stop / restart / status / install / uninstall / doctor / remap`
+- **ErrorBus + status.json**：统一内部错误出口，状态变化实时写入 `~/.capswriter/state/status.json`，5 秒心跳
+- **`capswriter start` 阻塞等待**：启动后轮询 status.json，明确成功或失败前不退出，实时输出进度
+- **辅助功能引导优化**：检测到权限缺失时 osascript 弹窗（只弹一次）+ 自动打开系统设置 + 每 15 秒重试
+- **SIGTERM 修复**：通过 `set_wakeup_fd` + 守护线程解决 NSApp.run() C RunLoop 期间 Python signal handler 无法执行的问题，`capswriter stop` 现可在数秒内干净退出
+- **server 60 秒自退出**：client 断连后 60 秒无新连接则 server 自动退出，`capswriter stop` 发 shutdown 信号可立即退出
+- **`install.sh`**：将 `capswriter` 注册为全局命令（写入 `~/.local/bin/`）
+
+### 变更
+
+- macOS 下推理后端默认切换为 `qwen_asr_mlx`，Windows 保持原有 GGUF + ONNX 路径不变
+- `capswriterd.py` 已归档，不再作为主路径使用
+
+---
+
 ## v2.5
 
 - **引入 [Qwen3-ASR-1.7B](https://github.com/HaujetZhao/Qwen3-ASR-GGUF)**：140ms 极速推理，准确率夯爆。Decoder Vulkan 加速默认打开，需占 1.6GB 显存。显卡空闲时，会降低显存频率，冷启动转录延迟升至 300ms。若用管理员权限运行 `nvidia-smi -lmc 9000` 锁定显存不降频，实测 RTX5050 转录延迟可降至 100ms
