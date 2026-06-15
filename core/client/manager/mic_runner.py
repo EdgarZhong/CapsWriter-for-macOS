@@ -63,6 +63,14 @@ class MicRunner:
             eb = getattr(self.app, 'error_bus', None)
             if eb:
                 eb.heartbeat()
+            # 键盘 tap 体检（macOS）：仅凭外部可观测状态发现「回调不会运行」类失效
+            # （撤辅助功能/回调死锁）。复用本 5s 心跳，无需专用守护线程。
+            bridge = getattr(self.app, 'macos_caps_bridge', None)
+            if bridge is not None:
+                try:
+                    bridge.check_health()
+                except Exception as e:
+                    logger.debug(f"键盘体检异常: {e}")
 
     async def run(self):
         """麦克风模式主入口"""

@@ -79,6 +79,11 @@ class MacOSF18Listener:
         # timeout 自救预算（最近若干次 timeout 的时间戳）
         self._timeout_times: list[float] = []
 
+        # 我们「意图」让 tap 处于启用态吗？周期性体检 check_health() 据此判断：
+        # 意图启用(True) 但系统报告已禁用 ⇒ 系统在背后禁了它(撤权/超时/回调死锁) ⇒ 兜底 fatal。
+        # 我们自己主动禁用时置 False，避免体检误判。
+        self._tap_should_be_enabled = False
+
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
@@ -110,6 +115,7 @@ class MacOSF18Listener:
     def stop(self) -> None:
         """停止事件拦截，释放 tap。"""
         self._stopping = True  # 先置标志，避免 _run_loop_thread 误判为意外退出
+        self._tap_should_be_enabled = False  # 主动停止，守护线程不再守护
         with self._lock:
             self._pressed = False
 
@@ -186,6 +192,7 @@ class MacOSF18Listener:
             Quartz.kCFRunLoopDefaultMode,
         )
         Quartz.CGEventTapEnable(self._tap, True)
+        self._tap_should_be_enabled = True   # 进入「意图启用」态，守护线程开始守护
         Quartz.CFRunLoopRun()   # 阻塞，直到 CFRunLoopStop 或 tap 被作废
 
         # CFRunLoop 退出：若非主动 stop()，即真故障（撤权 / timeout 预算耗尽 / tap 作废）
@@ -207,11 +214,9 @@ class MacOSF18Listener:
             self._on_timeout()
             return None
         if event_type == _kCGEventTapDisabledByUserInput:
-            # TCC 权限被撤销：主动停 RunLoop（不再依赖"会自动退出"的错误假设），
-            # 让 _run_loop_thread 走真故障处理（恢复 remap + 引导 + 停）。
-            logger.warning("[f18-listener] tap disabled by user input (TCC revoked) – stopping run loop")
-            if self._run_loop is not None:
-                Quartz.CFRunLoopStop(self._run_loop)
+            # TCC 权限被撤销（少数场景走这里）：统一走 _go_fatal —— 先禁 tap 放行键盘，
+            # 再停 RunLoop 触发真故障处理（恢复 remap + 引导）。
+            self._go_fatal("tap disabled by user input (TCC revoked)")
             return None
 
         keycode = Quartz.CGEventGetIntegerValueField(event, _kCGKeyboardEventKeycode)
@@ -236,23 +241,89 @@ class MacOSF18Listener:
 
         return event
 
+    @staticmethod
+    def _ax_is_trusted() -> bool:
+        """当前进程是否仍有辅助功能权限（撤权判据）。探测失败时不误判（返回 True）。"""
+        try:
+            from ApplicationServices import AXIsProcessTrusted
+            return bool(AXIsProcessTrusted())
+        except Exception:
+            return True
+
+    def _go_fatal(self, reason: str) -> None:
+        """升级真故障：**第一时间禁用 active tap 放行键盘**（解冻关键），再停 RunLoop 走恢复链路。
+
+        为什么必须先禁用 tap：`kCGHIDEventTap` 的 active tap 一旦「装着但进程已无权服务」，
+        系统会把键盘事件全部扣在该 tap 处等待处理 → 全局键盘冻结。`CGEventTapEnable(False)`
+        立即让事件正常透传，这才是解冻动作；之后 CFRunLoopStop 触发 _handle_tap_unavailable
+        （恢复 remap + 引导）。
+        """
+        logger.warning("[f18-listener] 升级 fatal：%s", reason)
+        self._tap_should_be_enabled = False  # 主动禁用，守护线程别再重复触发
+        try:
+            if self._tap is not None:
+                Quartz.CGEventTapEnable(self._tap, False)  # 立刻放行键盘，消除冻结
+        except Exception as e:
+            logger.warning("[f18-listener] 禁用 tap 失败: %s", e)
+        if self._run_loop is not None:
+            Quartz.CFRunLoopStop(self._run_loop)
+
+    def check_health(self) -> None:
+        """周期性外部体检（由 5s 心跳 `mic_runner._heartbeat_task` 调用，**非独立线程**）。
+
+        **仅凭 tap 的外部可观测状态判健康，不信任回调/业务的任何自我汇报。**
+        它覆盖的正是「回调不会运行 → 无法自检」的失效（循环无法观测自己的「没在执行」）：
+
+        - **回调死锁 / 撤辅助功能**：系统在背后禁用 tap ⇒ `CGEventTapIsEnabled(tap)==False`
+          （由系统维护的黑盒事实）。
+
+        发现异常即 `_go_fatal`（放行键盘 + 恢复 remap + 引导），**绝不 re-enable**。
+        注意：键盘「不冻结」并不依赖本体检（由系统超时窗 + `_on_timeout` 不盲目 re-enable 保证），
+        本体检只做善后/检测，故放在 5s 心跳上足矣、无需专线程。
+
+        （为什么不再探测「输入监控」：对这种主动型吞事件 tap，「辅助功能」是充分且唯一权限，
+        「输入监控」被它蕴含——撤辅助功能即由 `CGEventTapIsEnabled==False` 兜住，无独立盲区。）
+        """
+        if self._stopping or self._tap is None:
+            return
+        if not self._tap_should_be_enabled:
+            return  # 意图禁用态（启动中/正在 fatal/stop），不体检
+        try:
+            enabled = Quartz.CGEventTapIsEnabled(self._tap)
+        except Exception:
+            return
+        if not enabled:
+            logger.warning(
+                "[f18-listener] 体检: 意图启用但系统已禁用 tap"
+                "（撤辅助功能/超时/回调死锁），升级 fatal"
+            )
+            self._go_fatal("健康检查: tap 被系统禁用")
+
     def _on_timeout(self) -> None:
-        """tap 超时被禁用：自救（re-enable + 物理键态对账），并按预算判定是否升级 fatal。"""
-        logger.warning("[f18-listener] tap disabled by timeout, re-enabling")
+        """tap 超时被禁用：区分「撤权」与「偶发慢回调」。
+
+        **关键修复（实测）**：macOS 上运行时撤销辅助功能权限，表现为 `DisabledByTimeout`
+        （**不是** `DisabledByUserInput`）。若此刻已失去 trust，再 re-enable 只会让一个
+        「装着但已死」的 active tap 继续扣留键盘 → 永久冻结，且往往只来一次 timeout、预算
+        根本来不及升级。因此先查 trust：失去权限即立即升级 fatal（禁用 tap + 恢复），不 re-enable。
+        """
         if self._stopping or self._tap is None:
             return
 
-        # 预算：窗口内 timeout 次数过多，说明不是偶发慢回调 → 升级 fatal
+        # 撤权判据：失去辅助功能权限 → 不是偶发慢回调，立即升级 fatal（别再 re-enable 死 tap）
+        if not self._ax_is_trusted():
+            self._go_fatal("timeout 且已失去辅助功能权限（撤权）")
+            return
+
+        # 真·偶发慢回调（回调已 O(1)，这里应极罕见）：自救（re-enable + 物理键态对账），带预算
+        logger.warning("[f18-listener] tap disabled by timeout, re-enabling")
         now = time.monotonic()
         self._timeout_times = [t for t in self._timeout_times if now - t <= _TIMEOUT_BUDGET_WINDOW_S]
         self._timeout_times.append(now)
         if len(self._timeout_times) >= _TIMEOUT_BUDGET_MAX:
-            logger.warning(
-                "[f18-listener] timeout 预算耗尽（%ds 内 %d 次），升级为 fatal",
-                int(_TIMEOUT_BUDGET_WINDOW_S), len(self._timeout_times),
+            self._go_fatal(
+                f"timeout 预算耗尽（{int(_TIMEOUT_BUDGET_WINDOW_S)}s 内 {len(self._timeout_times)} 次）"
             )
-            if self._run_loop is not None:
-                Quartz.CFRunLoopStop(self._run_loop)
             return
 
         Quartz.CGEventTapEnable(self._tap, True)

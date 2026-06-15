@@ -91,6 +91,16 @@ class CapsWriterServer:
         """
         # 防连续触发
         if self.is_alive: return
+
+        # 单例守卫（必须在加载模型之前）：端口被占说明已有健康 server 在跑，
+        # 本实例直接静默退出 exit 0 —— 配合 plist KeepAlive: SuccessfulExit=false，
+        # launchd 不会重启它，旧 server 继续服务。
+        # 关键：这一步前置到 process_manager.start() 之前，避免重复实例先把模型
+        # 整个加载一遍（吃内存、引发转录时延飙升）才发现端口冲突。
+        if not self.socket_manager._check_port():
+            logger.warning("端口已被占用，疑似已有 server 实例在运行，本实例退出 (exit 0)")
+            os._exit(0)
+
         self.is_alive = True
 
         # 注册退出信号处理

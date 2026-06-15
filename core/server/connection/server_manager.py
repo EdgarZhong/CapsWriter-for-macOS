@@ -32,9 +32,18 @@ class SocketManager:
         self._server = None  # websockets.serve 返回的 server 对象
 
     def _check_port(self):
-        """检查端口可用性"""
+        """检查端口可用性（探测是否已有 server 在监听）。
+
+        必须设 SO_REUSEADDR，与真正的 websockets.serve（asyncio 在 Unix 下默认
+        reuse_address=True）行为一致：
+        - 真有 server 在监听 → bind 仍失败（两个活监听需 SO_REUSEPORT，SO_REUSEADDR 拦不住）
+          → 正确判定「被占」。
+        - 仅 TIME_WAIT 残留（刚停的 server 之前的 client 连接）→ bind 成功 → 正确判定「空闲」。
+        不设 SO_REUSEADDR 会被 TIME_WAIT 误报 EADDRINUSE（restart 卡死的根因）。
+        """
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((Config.addr, int(Config.port)))
                 return True
@@ -92,10 +101,13 @@ class SocketManager:
         if self._is_running:
             return
 
-        # 启动前自检端口
+        # 端口自检已前置到 CapsWriterServer.start()（模型加载之前）。
+        # 此处再做一次兜底：极少数 TOCTOU 竞态下端口可能在前置检查后才被占用，
+        # 此时静默 exit 0（不能用 input() —— launchd 下无 stdin 会抛 EOFError 崩溃，
+        # 反被 KeepAlive 拉起无限重载模型）。
         if not self._check_port():
-            input("\n按回车键退出...")
-            return
+            logger.warning("端口在启动竞态中被占用，server 静默退出 (exit 0)")
+            os._exit(0)
 
         self._is_running = True
 

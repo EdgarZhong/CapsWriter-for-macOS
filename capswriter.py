@@ -19,6 +19,7 @@ capswriter — CapsWriter for macOS 控制命令行工具。
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -113,6 +114,72 @@ def _client_pid_alive() -> int | None:
         return pid
     except Exception:
         return None
+
+
+def _client_pids() -> list[int]:
+    """返回所有 client 进程 PID（按 .app 可执行文件路径匹配，**不依赖 launchd 标签**）。
+
+    为什么不能只认 launchd 标签：client 是 NSApplication GUI app，一旦注册菜单栏/与
+    WindowServer 通信，会被 LaunchServices 从 `com.capswriter.client` 标签「领养」到
+    `application.com.capswriter.client.<ASN>` 动态标签。此后 `_launchctl_pid(原标签)`
+    与 `launchctl stop 原标签` 都够不到它 → stop 误判「未在运行」→ 孤儿存活、start 再起一个
+    → 双实例（D 问题根因）。按可执行文件路径查杀可覆盖任何标签下的全部实例（含多个孤儿）。
+    """
+    result = subprocess.run(
+        ['pgrep', '-f', str(APP_EXECUTABLE)],
+        capture_output=True, text=True,
+    )
+    pids: list[int] = []
+    for tok in result.stdout.split():
+        try:
+            pids.append(int(tok))
+        except ValueError:
+            pass
+    return pids
+
+
+def _stop_client() -> bool:
+    """停止**所有** client 实例（含被 LaunchServices 领养到 application.* 的孤儿）。
+
+    返回是否已全部停止。流程：
+    1. `launchctl stop 标签`：若仍被原标签追踪，让 launchd 视为主动停止（KeepAlive 不重启）；
+       已被领养时该调用是无害 no-op。
+    2. 按身份（exe 路径）SIGTERM 兜底，覆盖任何标签下的实例 → client 借此恢复 Caps remap。
+    3. 轮询最多 10s；仍存活则 SIGKILL 强杀。
+    """
+    # 1. 优雅停原标签（KeepAlive 协调）
+    _run(['launchctl', 'stop', LAUNCHD_LABEL_CLIENT], check=False)
+
+    pids = _client_pids()
+    if not pids:
+        print("客户端未在运行")
+        return True
+
+    print(f"正在停止客户端 (pid={', '.join(map(str, pids))}) ...")
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    # 等待退出（client 需先恢复 hidutil remap 再退）
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        time.sleep(0.5)
+        if not _client_pids():
+            print("  ✓ 客户端已停止")
+            return True
+
+    # 兜底强杀
+    stragglers = _client_pids()
+    print(f"警告：客户端 {stragglers} 未在 10s 内退出，强制结束 (SIGKILL)")
+    for pid in stragglers:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.5)
+    return not _client_pids()
 
 
 def _server_port_reachable() -> bool:
@@ -263,14 +330,8 @@ def cmd_install(args) -> int:
 def cmd_uninstall(args) -> int:
     """注销 launchd 服务（先停 client 再停 server，确保 remap 恢复）。"""
     # client 先停（持有 remap 生命周期，必须在 server 前清理）
-    if _launchctl_pid(LAUNCHD_LABEL_CLIENT) is not None:
-        _run(['launchctl', 'stop', LAUNCHD_LABEL_CLIENT], check=False)
-        print("已发送停止信号到客户端")
-        # 等待 client 完成 remap 恢复
-        for _ in range(16):
-            time.sleep(0.5)
-            if _launchctl_pid(LAUNCHD_LABEL_CLIENT) is None:
-                break
+    # 用 _stop_client() 按身份查杀，覆盖被领养到 application.* 的孤儿，避免 unload 后残留
+    _stop_client()
 
     if _plist_exists(LAUNCHD_PLIST_CLIENT):
         _run(['launchctl', 'unload', str(LAUNCHD_PLIST_CLIENT)], check=False)
@@ -338,10 +399,11 @@ def cmd_start(args) -> int:
     print()
     print("  ✓ 识别引擎已就绪")
 
-    # 2. 启动 client
-    client_pid = _launchctl_pid(LAUNCHD_LABEL_CLIENT)
-    if client_pid is None:
+    # 2. 启动 client（先按身份查重，已有实例/孤儿则不再起，避免双实例）
+    if not _client_pids():
         _run(['launchctl', 'start', LAUNCHD_LABEL_CLIENT], check=False)
+    else:
+        print("  客户端已在运行，跳过启动")
 
     # 等待 client status.json 出现且状态为 ready（最多 30s）
     print("  等待客户端就绪...", end='', flush=True)
@@ -382,21 +444,8 @@ def cmd_start(args) -> int:
 
 def cmd_stop(args) -> int:
     """停止 client 和 server（client 优先，等待 remap 恢复后再停 server）。"""
-    # 1. 先停 client（恢复 Caps Lock remap）
-    client_pid = _launchctl_pid(LAUNCHD_LABEL_CLIENT)
-    if client_pid is not None:
-        print(f"正在停止客户端 (pid={client_pid}) ...")
-        _run(['launchctl', 'stop', LAUNCHD_LABEL_CLIENT], check=False)
-        # 等待 client 完成 remap 恢复并退出（最多 10s）
-        for _ in range(20):
-            time.sleep(0.5)
-            if _launchctl_pid(LAUNCHD_LABEL_CLIENT) is None:
-                print("  ✓ 客户端已停止")
-                break
-        else:
-            print("警告：客户端未能在 10s 内停止，继续停止识别引擎")
-    else:
-        print("客户端未在运行")
+    # 1. 先停 client（按身份查杀，覆盖被领养到 application.* 的孤儿；client 借此恢复 remap）
+    _stop_client()
 
     # 2. 再停 server
     server_pid = _launchctl_pid(LAUNCHD_LABEL_SERVER)
@@ -424,20 +473,26 @@ def cmd_status(args) -> int:
     """显示 CapsWriter 运行状态快照（优先读 status.json，降级到 launchctl 检测）。"""
     from datetime import datetime
 
-    client_pid  = _launchctl_pid(LAUNCHD_LABEL_CLIENT)
+    client_pids = _client_pids()                       # 按身份查，覆盖被领养的孤儿
+    client_pid  = client_pids[0] if client_pids else None
     server_pid  = _launchctl_pid(LAUNCHD_LABEL_SERVER)
     server_port = _server_port_reachable()
     installed   = _plist_exists(LAUNCHD_PLIST_CLIENT) and _plist_exists(LAUNCHD_PLIST_SERVER)
     status      = _read_status_json()
 
-    # 判断 client 是否真的存活（status.json 存在且心跳新鲜）
-    client_alive = client_pid is not None
+    # 判断 client 是否真的存活（按进程身份，而非 launchd 标签，避免漏掉孤儿）
+    client_alive = bool(client_pids)
     status_stale = False
     if status is not None and not _status_is_fresh(status):
         status_stale = True  # status.json 存在但超过 10s 无心跳，可能僵死
 
     print("CapsWriter for macOS 状态")
     print("-" * 40)
+
+    # 多实例告警：正常应只有 1 个 client，>1 多半是孤儿残留（见 D 问题）
+    if len(client_pids) > 1:
+        print(f"  ⚠ 检测到 {len(client_pids)} 个客户端实例 "
+              f"(pid={', '.join(map(str, client_pids))})，疑似孤儿残留，建议 capswriter restart")
 
     if status is not None and client_alive:
         # 有 status.json + launchd 确认运行 → 完整显示

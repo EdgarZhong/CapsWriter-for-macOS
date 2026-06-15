@@ -168,7 +168,24 @@ class ResultProcessor:
             # 连接成功：更新状态并发通知
             if eb:
                 eb.update(state='ready', server_connected=True)
-                eb.notify("识别引擎已连接，CapsWriter 就绪", "server_connected")
+                # 关键：有权限问题时绝不报「就绪/就位」——server 连上 ≠ 键盘接管可用。
+                # 同步探测「辅助功能」权限（macOS 唯一所需权限），未授权就改报「键盘接管未就绪」，
+                # 键盘子系统会另行引导。（跨平台：仅 darwin 探测，失败一律视作 ok 不误报）
+                kbd_ok = True
+                try:
+                    import sys as _sys
+                    if _sys.platform == 'darwin':
+                        from ..shortcut.macos_permission_guide import check_accessibility
+                        kbd_ok = check_accessibility()
+                except Exception:
+                    kbd_ok = True
+                if kbd_ok:
+                    eb.notify("识别引擎已连接，CapsWriter 就绪", "server_connected")
+                else:
+                    eb.notify(
+                        "识别引擎已连接，但键盘接管未就绪，请按引导检查权限",
+                        "server_connected_no_kbd",
+                    )
 
             # 2. 消息接收循环
             while not self._exit_event.is_set():
