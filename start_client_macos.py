@@ -83,14 +83,14 @@ def _start_client_thread() -> None:
 # 生命周期：状态项由本进程（= 客户端 .app）持有，进程退出（SIGTERM /
 #           terminate / os._exit）时 macOS 自动移除，因此图标在菜单栏的
 #           存活周期天然与客户端一致，无需手动管理销毁。
-# 图标：assets/branding/capswriter-menubar-template.svg
+# 图标：assets/icon/capswriter-menubar-template.svg（代码正式素材 v2；assets/branding/ 仅放设计/调试件）
 #   - 新版 macOS 的 NSImage 原生按矢量（_NSSVGImageRep）渲染，任意倍率清晰；
 #   - setTemplate_(True) 让系统按深 / 浅色菜单栏自动反色（只用 alpha）。
 # 约束：必须在主线程创建，并保留模块级强引用，防止被 GC 回收导致图标消失。
 # ---------------------------------------------------------------------------
 _status_item = None
-_MENUBAR_ICON = PROJECT_ROOT / 'assets' / 'branding' / 'capswriter-menubar-template.svg'      # 矢量，macOS 13+ 原生
-_MENUBAR_ICON_PNG = PROJECT_ROOT / 'assets' / 'branding' / 'capswriter-menubar-template.png'  # @2x 位图，旧系统兜底
+_MENUBAR_ICON = PROJECT_ROOT / 'assets' / 'icon' / 'capswriter-menubar-template.svg'      # 矢量，macOS 13+ 原生
+_MENUBAR_ICON_PNG = PROJECT_ROOT / 'assets' / 'icon' / 'capswriter-menubar-template.png'  # @2x 位图，旧系统兜底
 _MENUBAR_ICON_HEIGHT = 18.0   # pt：菜单栏图标高度（mark 含约 11% 留白，实际墨迹 ~16pt）
 _MENUBAR_AUTOSAVE = "CapsWriterStatusItem"   # 固定标识：macOS 据此持久化用户摆放的位置
 
