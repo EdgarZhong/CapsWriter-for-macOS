@@ -58,7 +58,7 @@ class MacOSCapsF18Bridge:
     def check_health(self) -> None:
         """周期性体检入口（由 5s 心跳调用），委托给底层 F18 listener。
 
-        覆盖「回调不会运行 → 无法自检」的失效（撤辅助功能/回调死锁），
+        覆盖「回调不会运行 → 无法自检」的失效（撤辅助功能/回调死锁/撤输入监控），
         是渐进权限引导的触发兜底。详见 `MacOSF18Listener.check_health`。
         """
         self._listener.check_health()
@@ -67,8 +67,8 @@ class MacOSCapsF18Bridge:
         """CGEventTap 真故障（创建失败 / 运行中撤权 / RunLoop 退出）的统一处理。
 
         采用「干净单路径 + 渐进权限引导」UX（见 docs/macos-architecture-decisions.md 第六节）：
-        恢复 remap → 标记不可用 + 通知 → 渐进引导（探测辅助功能权限，按 stale 与否分级引导）
-        → 提示重启。不再静默轮询重建（旧的 15s 自动恢复循环已废弃）。
+        恢复 remap → 标记不可用 + 通知 → 渐进引导（探测辅助功能/输入监控两项权限，逐项引导，
+        系统设置单窗口故串行）→ 提示重启。不再静默轮询重建（旧的 15s 自动恢复循环已废弃）。
 
         本方法已在独立线程（TapFailedCallback）执行，run_guide 内部的轮询/等待阻塞无碍。
         """
@@ -91,7 +91,7 @@ class MacOSCapsF18Bridge:
         if eb:
             eb.update(accessibility_ok=False)
             eb.notify(
-                "键盘接管已暂停，正在引导你检查辅助功能权限",
+                "键盘接管已暂停，正在引导你检查辅助功能/输入监控权限",
                 "permission_lost",
             )
 

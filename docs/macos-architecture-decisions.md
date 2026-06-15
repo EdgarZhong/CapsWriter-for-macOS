@@ -95,7 +95,7 @@ server 不依赖外部守护，通过监听 client 的 WebSocket 连接状态管
 - 删掉 `socket_manager.start()` 里端口冲突时的 `input("按回车键退出")`——launchd 下无 stdin 会抛 `EOFError` 崩溃，反被 `KeepAlive` 拉起无限重载；改为兜底 `os._exit(0)`（应对前置检查与真正 bind 之间的 TOCTOU 竞态）。
 - **`_check_port` 必须设 `SO_REUSEADDR`**（与 `websockets.serve` 在 Unix 下默认 `reuse_address=True` 一致）：否则刚停的 server 留下的 **TIME_WAIT** 连接会让裸 bind 误报 `EADDRINUSE` → 守卫假阳性 → 新 server 秒退、`capswriter restart` 卡死在"等识别引擎就绪"。设了之后：真有活监听仍 bind 失败（两个活监听需 `SO_REUSEPORT`）→ 正确判占；仅 TIME_WAIT → bind 成功 → 正确判空。（2026-06-15 restart 卡死实测复现并修复）
 
-> 注：client 因「辅助功能」权限变更被系统强退/重开，**不会**牵连 server——client 从不拉起 server，server 是独立 launchd agent，多连一个 client 也只是多一条 socket。真正的重复实例风险在 **client 侧**（孤儿/reparent，见任务看板），与 server 无关。
+> 注：client 因「输入监控」权限变更被系统强退/重开，**不会**牵连 server——client 从不拉起 server，server 是独立 launchd agent，多连一个 client 也只是多一条 socket。真正的重复实例风险在 **client 侧**（孤儿/reparent，见任务看板），与 server 无关。
 
 ---
 
@@ -256,8 +256,9 @@ tap 回调内**只允许**：判 keycode、吞掉 F18、向工作线程发信号
 | `DisabledByTimeout` + **已失 trusted** | **运行时撤权的真实表现**（不是 `DisabledByUserInput`！） | `_go_fatal`：先禁 tap 再恢复 |
 | 状态失稳（丢 keyUp，`_is_down` 卡死） | 内存态 ≠ 物理态 | `CGEventSourceKeyState(F18)` 对账，补跑 up |
 | `DisabledByUserInput` | TCC 撤权（少数场景才走这条） | `_go_fatal` |
-| `CGEventTapCreate == None` | 启动即无辅助功能权限 | fatal → 渐进权限引导 |
+| `CGEventTapCreate == None` | 启动即无辅助功能/输入监控权限 | fatal → 渐进权限引导 |
 | `CGEventTapIsEnabled==False` 但「意图启用」 | **心跳体检黑盒判据**：系统在背后禁了 tap（撤辅助功能/超时/**回调死锁**） | `_go_fatal` |
+| `IOHIDCheckAccess(ListenEvent)!=granted` | **撤输入监控**：tap 仍 enabled 但系统静默停发事件、Caps 静默失效 | `_go_fatal` |
 | RunLoop 意外退出 | tap 被系统作废 | fatal |
 
 > **实测关键纠正**：运行时撤销辅助功能，macOS 发的是 **`DisabledByTimeout`**，不是 `DisabledByUserInput`。旧代码在 timeout 分支盲目 re-enable 死 tap → 永久冻结、且只来一次 timeout 预算来不及升级、`_handle_tap_failed` 永不触发 → **既冻键盘又不弹任何提醒**。
@@ -270,10 +271,11 @@ tap 回调内**只允许**：判 keycode、吞掉 F18、向工作线程发信号
 |------|:---:|------|
 | 撤辅助功能 | ✅ `DisabledByTimeout` | **回调自检**（`_on_timeout` 查 `AXIsProcessTrusted`/预算，打断 re-enable 死循环）——不需要任何外部线程 |
 | 回调真死锁 | ❌ | 外部体检（但系统已自动禁 tap 兜底**不冻**，体检只做善后） |
+| 撤输入监控 | ❌（静默停发） | 外部体检（`IOHIDCheckAccess`，唯一可行） |
 
 **外部体检不是独立线程，而是复用已有的 5s 心跳**（`mic_runner._heartbeat_task` → `bridge.check_health()` → `listener.check_health()`）。理由：
 - 「永不冻结」**不依赖**体检——由系统超时窗（约 1–2s，macOS 判定 tap 无响应即自动禁用，我们消不掉）+ `_on_timeout` 不盲目 re-enable 共同保证。体检只做**善后/检测**，非关键路径，故 5s 延迟无碍，**无需专用守护线程**（省一条线程，更优雅）。
-- 体检**只读系统维护的黑盒事实**（`CGEventTapIsEnabled`），完全不信任回调/业务的自我汇报；即便回调彻底死锁也能发现并善后。
+- 体检**只读系统维护的黑盒事实**（`CGEventTapIsEnabled` + `IOHIDCheckAccess`），完全不信任回调/业务的自我汇报；即便回调彻底死锁也能发现并善后。
 - 我们自己主动禁用时（fatal/stop）置 `_tap_should_be_enabled=False`，体检不误判。
 
 ### 自救（静默，不打扰用户）
@@ -288,28 +290,27 @@ tap 回调内**只允许**：判 keycode、吞掉 F18、向工作线程发信号
 
 1. **立刻恢复 hidutil remap**（Caps 变回普通键，消除"映射着但 tap 死了"的 limbo）；
 2. `ErrorBus.update(accessibility_ok=False)` + 一条"键盘接管已暂停，正在引导你检查权限"通知；
-3. 调 **渐进权限引导**（`macos_permission_guide.run_guide`，见下）——探测「辅助功能」真实状态，按 stale 与否分级引导；
+3. 调 **渐进权限引导**（`macos_permission_guide.run_guide`，见下）——探测两项权限真实状态，只引导未授权的那项；
 4. **停**，不再静默轮询重建——等用户按指引把权限补齐后**重启客户端**。
 
 **触发 fatal 的统一出口 `_go_fatal(reason)`**：① `CGEventTapEnable(tap, False)` 先放行键盘 → ② `_tap_should_be_enabled=False` → ③ `CFRunLoopStop` → `_run_loop_thread` 退出后调 `_handle_tap_unavailable` → `_handle_tap_failed`。三处调它：`_on_timeout`（失 trusted）、`DisabledByUserInput` 分支、守护线程（`CGEventTapIsEnabled==False`）。
 
 ### 权限引导：渐进探测式（2026-06-15 收敛，取代旧"单弹窗统一删除"）
 
-**只引导「辅助功能」一项（2026-06-15 实测收敛，曾误判为双权限）：**
+**两个硬约束逼出的设计：**
 
-对这种**主动型**吞事件 tap（`kCGEventTapOptionDefault`，吞 F18 + 拦截全局 keyDown/keyUp），「**辅助功能** Accessibility」是**充分且唯一**的权限，「**输入监控** Input Monitoring」被它**蕴含**。干净环境下只授辅助功能 + 重启即可完全工作，「输入监控」列表里**根本不会出现 CapsWriter**。早先「输入监控也要」的观感，来自 dev 反复重签名留下的**失效旧记录** + 系统联动；单独引导它只会对着一个空列表干等 25s 误报「未授予」，纯属死胡同，**已整体删除**（`run_guide` / 就绪门控 / `check_health` 三处的输入监控分支均移除）。
+1. **要两个权限**：这个吞 F18、监听全局 keyDown/keyUp 的主动 tap，macOS 同时要「**辅助功能** Accessibility」和「**输入监控** Input Monitoring」。旧文案只提辅助功能，用户卡在输入监控上无人引导。
+2. **系统设置是单窗口**：`open ...Privacy_Accessibility` 和 `...Privacy_ListenEvent` 第二条只让同一窗口**导航过去**，开不出两个面板 → 引导必须**串行**，一次只处理一项。
 
-> 「输入监控」`kTCCServiceListenEvent`（`IOHIDCheckAccess(ListenEvent)`）只对**被动监听型** tap（`kCGEventTapOptionListenOnly`）有意义；本项目用的是主动吞事件 tap，不走这条权限。
+**核心矛盾**：用户**肉眼分不清**「关着的有效条目」和「关着的失效条目（dev 重签名后 cdhash 对不上的旧记录）」——列表长一样、无时间戳。所以"该删还是该拨"**不能甩给用户判断**。
 
-**仍要这一层引导的理由**（核心矛盾）：用户**肉眼分不清**「关着的有效条目」和「关着的失效条目（dev 重签名后 cdhash 对不上的旧记录）」——列表长一样、无时间戳。所以"该删还是该拨"**不能甩给用户判断**。
-
-**渐进探测式**（`macos_permission_guide.run_guide`，单一权限）：
+**渐进探测式**（`macos_permission_guide.run_guide`）：对 `[辅助功能, 输入监控]` 逐项跑——
 
 | 探测到的状态 | 动作 | API |
 |------|------|-----|
-| granted | 直接完成 | `AXIsProcessTrusted` |
-| unknown（从没问过） | 触发**原生授权弹窗**（按当前签名新建有效记录，最干净） | `AXIsProcessTrustedWithOptions{prompt:True}` |
-| denied（有记录但关着） | 开面板 + 提示"**先拨开关**" → 后台**轮询** | 轮询 `check_accessibility` |
+| granted | 跳过 | `AXIsProcessTrusted` / `IOHIDCheckAccess(ListenEvent)==0` |
+| unknown（从没问过） | 触发**原生授权弹窗**（按当前签名新建有效记录，最干净） | `AXIsProcessTrustedWithOptions{prompt:True}` / `IOHIDRequestAccess` |
+| denied（有记录但关着） | 开面板 + 提示"**先拨开关**" → 后台**轮询** | 轮询 `_is_granted` |
 | denied 且拨了仍不生效（超时） | 升级提示"**这是旧记录 → − 删除 → 重启 → 重新允许**" | osascript 弹窗 |
 
 **关键**：用户任意时刻屏幕上只有一条明确指令；"拨开关到底生没生效"由 app 轮询判定，**用户不必自己诊断 stale**。先试最轻的「拨开关」（覆盖运行时撤权这种有效记录场景），只有轮询超时（≈25s）才升级到「删除+重启」（覆盖 dev 重签名的失效记录场景）。

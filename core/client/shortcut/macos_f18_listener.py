@@ -250,6 +250,20 @@ class MacOSF18Listener:
         except Exception:
             return True
 
+    @staticmethod
+    def _input_monitoring_ok() -> bool:
+        """当前进程是否仍有输入监控权限。探测失败时不误判（返回 True）。
+
+        撤销输入监控**不会**禁用 tap（`CGEventTapIsEnabled` 仍 True、AX 仍 trusted），
+        但系统会**静默停止向 tap 投递事件** → Caps 接管静默失效、无任何报错。
+        必须单独探测它（IOHIDCheckAccess），否则守护线程的 enabled 判据漏掉这一类。
+        """
+        try:
+            from .macos_permission_guide import check_input_monitoring, HID_GRANTED
+            return check_input_monitoring() == HID_GRANTED
+        except Exception:
+            return True
+
     def _go_fatal(self, reason: str) -> None:
         """升级真故障：**第一时间禁用 active tap 放行键盘**（解冻关键），再停 RunLoop 走恢复链路。
 
@@ -272,17 +286,16 @@ class MacOSF18Listener:
         """周期性外部体检（由 5s 心跳 `mic_runner._heartbeat_task` 调用，**非独立线程**）。
 
         **仅凭 tap 的外部可观测状态判健康，不信任回调/业务的任何自我汇报。**
-        它覆盖的正是「回调不会运行 → 无法自检」的失效（循环无法观测自己的「没在执行」）：
+        它覆盖的正是「回调不会运行 → 无法自检」的两类失效（循环无法观测自己的「没在执行」）：
 
         - **回调死锁 / 撤辅助功能**：系统在背后禁用 tap ⇒ `CGEventTapIsEnabled(tap)==False`
           （由系统维护的黑盒事实）。
+        - **撤输入监控**：tap 仍 enabled、AX 仍 trusted，但系统**静默停发事件** ⇒ Caps 静默失效，
+          只能靠 `IOHIDCheckAccess` 单独探测。
 
         发现异常即 `_go_fatal`（放行键盘 + 恢复 remap + 引导），**绝不 re-enable**。
         注意：键盘「不冻结」并不依赖本体检（由系统超时窗 + `_on_timeout` 不盲目 re-enable 保证），
         本体检只做善后/检测，故放在 5s 心跳上足矣、无需专线程。
-
-        （为什么不再探测「输入监控」：对这种主动型吞事件 tap，「辅助功能」是充分且唯一权限，
-        「输入监控」被它蕴含——撤辅助功能即由 `CGEventTapIsEnabled==False` 兜住，无独立盲区。）
         """
         if self._stopping or self._tap is None:
             return
@@ -298,6 +311,16 @@ class MacOSF18Listener:
                 "（撤辅助功能/超时/回调死锁），升级 fatal"
             )
             self._go_fatal("健康检查: tap 被系统禁用")
+            return
+
+        # tap 仍 enabled 但输入监控被撤 → 系统静默停发事件、Caps 静默失效。
+        # 单独探测，掉权即 fatal+引导，消除「不冻但 Caps 不响应、还没任何提示」的盲区。
+        if not self._input_monitoring_ok():
+            logger.warning(
+                "[f18-listener] 体检: 输入监控权限被撤销"
+                "（tap 仍开但收不到事件），升级 fatal"
+            )
+            self._go_fatal("健康检查: 输入监控权限被撤销")
 
     def _on_timeout(self) -> None:
         """tap 超时被禁用：区分「撤权」与「偶发慢回调」。
