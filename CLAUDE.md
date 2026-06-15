@@ -4,7 +4,7 @@
 
 - 分支：`mac-dev`，基线：`master`
 - 为 macOS / Apple Silicon 新增 `qwen_asr_mlx` 后端，实现 Caps Lock 长按录音、结果返回、剪贴板写入、自动上屏。
-- **当前阶段：架构重新梳理完毕（2026-05-23）。capswriterd 废弃，改为 launchd 直接管两个独立 agent。P0 崩溃待诊断，P1 架构重构待实施。**
+- **当前阶段：launchd 双 agent 架构已落地，下一步转入后端推理优化（2026-06-05）。当前优先排查 `qwen_asr_mlx` 在 macOS 上使用 1.7B-8bit 时的精度表现，重点对比 Windows 侧 4bit 路线。**
 - 完整架构决策见 `docs/macos-architecture-decisions.md`
 
 ---
@@ -40,9 +40,11 @@ launchd
 | Accessibility 引导 | 列表有 → 点「-」删除；没有 → 等自动出现；不引导点「+」；osascript 弹窗只弹一次；15s 重试 |
 | 连接状态通知 | 每次 WebSocket 状态变化发系统通知，冷启动第一次也通知 |
 | 用户心智 | 运维层透明（只操作 CapsWriter 整体）；故障层用「识别引擎」指代 server |
-| 菜单栏 GUI | 静态 `waveform`（SF Symbols，灰色，不随状态变化）；菜单项：📋 复制最近结果 / ✨ 编辑热词（open hot.txt）/ Quit；LLM 相关菜单项推后；不用 mic/mic.fill（与麦克风胶囊重合） |
+| 菜单栏 GUI | 采用**自定义矢量 mark**（"会说话的⇪"：气泡 + 波形 + Caps Lock）作菜单栏 template，**放弃** SF Symbols `waveform`；NSImage 原生读 SVG（`_NSSVGImageRep` 矢量，任意倍率清晰）+ `isTemplate` 深 / 浅色自适应 + `autosaveName` 固定位置；旧系统（<13）@2x PNG 兜底。当前仅图标，下拉菜单（📋 复制最近结果 / ✨ 编辑热词 / Quit）后续再加 |
 | 显示名称 | `CapsWriter for macOS` |
 | 信号处理 | SIGTERM：set_wakeup_fd + SigtermWatcher 守护线程（NSApp.run() C RunLoop 期间 Python signal handler 无法执行）→ _critical_cleanup() → os._exit(0)；SIGINT 双击确认 |
+| 流式识别策略 | 当前阶段**不**把“产品级流式识别 / 流式显示”作为优先目标。Qwen3-ASR 的 decoder 虽具备自回归逐 token 输出能力，但要做成稳定的端到端流式体验仍需额外的 chunking、稳定前缀/不稳定尾巴管理与中间结果提交策略；现阶段先聚焦最终结果精度 |
+| MLX 后端演进路线 | 当前 `qwen_asr_mlx` 只是一层最小适配，后续精度优化主路线改为：**fork `mlx-qwen3-asr`，接管中层推理编排**（prompt 组装、language/context 策略、generation config、chunking、aligner 接法），而非继续把 `Session.transcribe()` 作为黑盒 |
 
 ---
 
@@ -61,7 +63,8 @@ launchd
 | **M4：CLI 改进** | ✅ | `start` 阻塞轮询 status.json 等 ready；`status` 读 status.json 展示完整快照 |
 | **M5：Accessibility 引导优化** | ✅ | osascript 分支弹窗（只弹一次）；15s 重试；ErrorBus wire accessibility_ok；CLI start 超时有具体提示 |
 | **SIGTERM 修复** | ✅ | set_wakeup_fd + SigtermWatcher 守护线程；_critical_cleanup() + os._exit(0)；capswriter stop 现可在几秒内干净退出 |
-| **M6：菜单栏图标** | 🔲 待实施 | 静态 `waveform`（SF Symbols，不随状态变化，避免与麦克风胶囊重合）；菜单项：📋 复制最近结果 / ✨ 编辑热词（open hot.txt）/ Quit；LLM 相关推后 |
+| **M6：菜单栏图标** | ✅ | 自定义矢量 mark 作 template（`start_client_macos.py:_install_status_item`）：NSImage 原生读 SVG（`_NSSVGImageRep` 矢量）+ `isTemplate` 深浅自适应 + `autosaveName` 固定位置；旧系统 @2x PNG 兜底 + 文字兜底；仅图标暂不挂菜单；资源在 `assets/branding/capswriter-menubar-template.{svg,png}` |
+| **P3：后端推理精度调优** | 🟡 进行中 | 聚焦 `qwen_asr_mlx`：核对 8bit/4bit 模型选择、上下文/热词能力缺口、音频前处理与解码参数差异，评估是否需要补齐能力或回退默认规格 |
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |
 | FFmpeg 路径确认 | 🔲 待确认 | launcher_embed 进程 PATH 是否含 FFmpeg |
@@ -79,11 +82,11 @@ launchd
 
 ## 下一步工作
 
-| 里程碑 | 任务 |
+| 优先级 | 任务 |
 |--------|------|
-| ✅ M1 | launchd 双 plist 架构已完成 |
-| **M2** | server 60s 自退出：`start_server.py` / server 侧监听 WebSocket 连接状态，断连 60s 后 exit 0；`capswriter stop` 发 WebSocket shutdown 信号 |
-| **M3** | ErrorBus + status.json：`~/.capswriter/state/status.json`；状态变化 + 每 5s 心跳写入；退出时删除 |
-| **M4** | CLI 改进：`start` 阻塞轮询 status.json；`status` 读状态文件；`doctor` 对齐新架构 |
-| **M5** | Accessibility 引导：osascript 分支弹窗 + 15s 重试 + CLI 持续输出 |
-| M6 | 菜单栏图标（SF Symbols mic/mic.fill）|
+| P0 | 用同一批音频样本对比 `qwen_asr_mlx` 与 Windows `qwen_asr` 路线，区分“量化差异”与“接入差异” |
+| P0 | fork `mlx-qwen3-asr`，摆脱 `Session.transcribe()` 黑盒接法，优先夺回 prompt 组装、language/context 策略、generation config 的控制权 |
+| P0 | 复核并补齐 `qwen_asr_mlx` 当前缺失能力：服务端热词、解码参数、chunking 策略、aligner 接法 |
+| P1 | 评估默认模型策略是否仍应保持“macOS 优先 8bit”，或改为可配置优先级 / 按机器回退 4bit |
+| P1 | 在 fork 路线稳定后，再决定是否需要更下沉的 MLX 层改造；当前不投入产品级流式识别实现 |
+| P2 | 菜单栏下拉菜单与状态显示（图标已落地，仅差菜单内容：📋 复制最近结果 / ✨ 编辑热词 / Quit） |

@@ -76,6 +76,87 @@ def _start_client_thread() -> None:
     t.start()
 
 
+# ---------------------------------------------------------------------------
+# 菜单栏状态项（NSStatusItem）
+#
+# 当前阶段：仅显示图标，暂不挂菜单（后续再加菜单内容）。
+# 生命周期：状态项由本进程（= 客户端 .app）持有，进程退出（SIGTERM /
+#           terminate / os._exit）时 macOS 自动移除，因此图标在菜单栏的
+#           存活周期天然与客户端一致，无需手动管理销毁。
+# 图标：assets/branding/capswriter-menubar-template.svg
+#   - 新版 macOS 的 NSImage 原生按矢量（_NSSVGImageRep）渲染，任意倍率清晰；
+#   - setTemplate_(True) 让系统按深 / 浅色菜单栏自动反色（只用 alpha）。
+# 约束：必须在主线程创建，并保留模块级强引用，防止被 GC 回收导致图标消失。
+# ---------------------------------------------------------------------------
+_status_item = None
+_MENUBAR_ICON = PROJECT_ROOT / 'assets' / 'branding' / 'capswriter-menubar-template.svg'      # 矢量，macOS 13+ 原生
+_MENUBAR_ICON_PNG = PROJECT_ROOT / 'assets' / 'branding' / 'capswriter-menubar-template.png'  # @2x 位图，旧系统兜底
+_MENUBAR_ICON_HEIGHT = 18.0   # pt：菜单栏图标高度（mark 含约 11% 留白，实际墨迹 ~16pt）
+_MENUBAR_AUTOSAVE = "CapsWriterStatusItem"   # 固定标识：macOS 据此持久化用户摆放的位置
+
+
+def _menubar_dbg(msg: str) -> None:
+    """菜单栏诊断日志：追加写入独立文件，避免被 stderr 噪音淹没。"""
+    try:
+        log = Path.home() / '.capswriter' / 'logs' / 'menubar.log'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open('a', encoding='utf-8') as fp:
+            fp.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+def _load_menubar_image():
+    """加载菜单栏图标：优先矢量 SVG（macOS 13+ 原生 _NSSVGImageRep，任意倍率最清晰），
+    旧系统（macOS < 13）NSImage 不支持 SVG 时回退到 @2x PNG。
+    返回 (NSImage, 来源标记)；都失败返回 (None, None)。"""
+    from AppKit import NSImage
+    img = NSImage.alloc().initWithContentsOfFile_(str(_MENUBAR_ICON))
+    if img is not None and img.isValid():
+        return img, 'svg'
+    img = NSImage.alloc().initWithContentsOfFile_(str(_MENUBAR_ICON_PNG))
+    if img is not None and img.isValid():
+        return img, 'png'
+    return None, None
+
+
+def _install_status_item() -> None:
+    """在系统菜单栏创建 CapsWriter 状态项（仅图标）。必须在主线程调用。"""
+    global _status_item
+    if _status_item is not None:
+        return
+    try:
+        from AppKit import NSStatusBar, NSVariableStatusItemLength
+        from Foundation import NSMakeSize
+
+        item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+        # autosaveName：让 macOS 按固定标识持久化用户摆放的位置。
+        # 用户 ⌘ 拖动图标到喜欢的位置后，重启仍固定在那、不被其它 app 顶掉。
+        item.setAutosaveName_(_MENUBAR_AUTOSAVE)
+
+        image, src = _load_menubar_image()
+        btn = item.button()
+        if image is not None and btn is not None:
+            # 等比设高：宽度按 mark 宽高比缩放
+            isz = image.size()
+            aspect = (isz.width / isz.height) if isz.height else 1.0
+            image.setSize_(NSMakeSize(_MENUBAR_ICON_HEIGHT * aspect, _MENUBAR_ICON_HEIGHT))
+            image.setTemplate_(True)   # 系统按菜单栏外观（深/浅）自动反色
+            btn.setImage_(image)
+            btn.setToolTip_("CapsWriter")
+            _menubar_dbg(f"ok via {src}")
+        else:
+            # 图标都加载失败时用文字兜底，至少能看到状态项
+            if btn is not None:
+                btn.setTitle_("CW")
+            _menubar_dbg("icon load failed -> text fallback 'CW'")
+            print(f"[CapsWriter.app] 菜单栏图标加载失败: {_MENUBAR_ICON} / {_MENUBAR_ICON_PNG}", file=sys.stderr)
+        _status_item = item   # 强引用，防止被回收
+    except Exception as e:
+        _menubar_dbg(f"EXCEPTION {e!r}")
+        print(f"[CapsWriter.app] 创建菜单栏状态项失败: {e}", file=sys.stderr)
+
+
 class _AppDelegate(NSObject):
     """NSApplication 代理，处理应用生命周期事件。"""
 
@@ -84,6 +165,9 @@ class _AppDelegate(NSObject):
         PortAudio/sounddevice 直接调 CoreAudio，不会触发 TCC 弹窗；
         必须走 AVFoundation API 才能让 macOS 弹出授权对话框。
         """
+        # 先在菜单栏挂出图标（主线程），使其与客户端 .app 同生命周期出现
+        _install_status_item()
+
         try:
             import AVFoundation as _avf
             status = _avf.AVCaptureDevice.authorizationStatusForMediaType_(
