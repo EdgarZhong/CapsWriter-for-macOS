@@ -70,6 +70,29 @@ _nsapp = NSApplication.sharedApplication()
 _nsapp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 
+def _set_app_icon() -> None:
+    """显式给运行进程设置 app 图标（从 bundle 的 app-icon.icns 读取）。
+
+    为什么需要：launchd 直接 exec agent 二进制启动时，进程的 applicationIconImage
+    为空。而 UNUserNotificationCenter 通知横幅左侧图标取的是「发通知进程报告的 app
+    图标」，不是磁盘 bundle 图标 —— 于是横幅显示破图占位（同一时刻系统设置→通知里
+    读的是磁盘 bundle 图标，反而正常）。显式设上后横幅才会显示 CapsWriter 自己的图标。
+
+    Accessory（LSUIElement）下不显示 Dock 图标，故此调用只影响通知等系统 UI，无副作用。
+    """
+    try:
+        from AppKit import NSImage
+        icns = PROJECT_ROOT / 'assets' / 'icon' / 'app-icon.icns'
+        img = NSImage.alloc().initWithContentsOfFile_(str(icns))
+        if img is not None and img.isValid():
+            _nsapp.setApplicationIconImage_(img)
+    except Exception:
+        pass
+
+
+_set_app_icon()
+
+
 def _start_client_thread() -> None:
     """启动 CapsWriterClient 子线程。"""
     t = threading.Thread(target=_run_client, name="CapsWriterClientThread", daemon=True)
