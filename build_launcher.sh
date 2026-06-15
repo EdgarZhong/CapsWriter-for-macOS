@@ -38,6 +38,17 @@ clang -std=c11 -Wall -Wextra -O2 -arch arm64 \
     -Wl,-rpath,"$PY_LIBDIR" \
     -o "$OUT"
 
+echo "=== 同步应用图标 ==="
+# 源文件 assets/icon/app-icon.icns 为准，拷入 bundle Resources（Info.plist 已声明 CFBundleIconFile=app-icon）
+ICON_SRC="$SCRIPT_DIR/assets/icon/app-icon.icns"
+ICON_DST="$SCRIPT_DIR/CapsWriter.app/Contents/Resources/app-icon.icns"
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$ICON_DST"
+    echo "  已同步: $ICON_DST"
+else
+    echo "  警告：未找到 $ICON_SRC，跳过图标同步" >&2
+fi
+
 echo "=== 重新签名 ==="
 # hardened runtime（--options runtime）保持 TCC Accessibility 授权有效；
 # disable-library-validation 允许加载外部 libpython（mise 安装，非 Apple 签名）

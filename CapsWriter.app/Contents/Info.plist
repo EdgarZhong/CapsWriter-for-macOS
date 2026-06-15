@@ -16,6 +16,10 @@
     <key>CFBundleExecutable</key>
     <string>CapsWriter</string>
 
+    <!-- 应用图标（Resources/app-icon.icns；Finder / 显示简介 / 权限列表显示） -->
+    <key>CFBundleIconFile</key>
+    <string>app-icon</string>
+
     <key>CFBundlePackageType</key>
     <string>APPL</string>
 
