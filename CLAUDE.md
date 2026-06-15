@@ -48,7 +48,7 @@ launchd
 | App 图标 | `.icns` 放 `assets/icon/app-icon.icns`（源）→ 拷入 bundle `Resources/` + `Info.plist` `CFBundleIconFile=app-icon` + 重签名；`build_launcher.sh` 每次构建自动同步。LSUIElement 不进 Dock，图标体现在 Finder / 简介 / 权限列表 |
 | 通知后端 | `osascript`（归属脚本编辑器=卷轴）→ 改 **`UNUserNotificationCenter`**（CapsWriter 身份）；裸跑无 bundle 时回退 osascript；调用前用 `bundleIdentifier()` 防 abort。**横幅图标破图问题已 park**（见 `docs/bug-report-notification-icon.md`） |
 | 键盘失败处理 | 见 `docs/macos-architecture-decisions.md` 第六节。**回调非阻塞铁律**（业务甩工作线程队列）；失败分类（timeout/丢keyUp=自救带预算，撤权/创建失败/RunLoop退出=fatal）；fatal 单路径=恢复 remap+通知+引导重授权后重启，**删 15s 静默循环**；撤权时主动 `CFRunLoopStop` |
-| 权限恢复 UX | **渐进探测式**（2026-06-15 取代旧"统一−删除单弹窗"）：要**辅助功能 + 输入监控**两权限，系统设置单窗口故**串行**引导；`macos_permission_guide.run_guide` 逐项探测 granted/unknown/denied —— unknown 弹原生窗、denied 先提示拨开关并轮询、拨了超时(≈25s)仍不生效才升级到"−删除+重启"。"该删还是该拨"由 app 轮询判定，**用户不自己诊断 stale**。TCC 绑签名仍是底层原因（拨不生效=旧记录签名失配）。详见 `docs/macos-architecture-decisions.md` 第六节 |
+| 权限恢复 UX | **渐进探测式**（2026-06-16 收敛）：运行期与冷启动的统一引导口径暂时只保留**辅助功能**。`macos_permission_guide.run_guide` 仅探测 `AXIsProcessTrusted`：unknown 弹原生窗、denied 先提示拨开关并轮询、拨了超时(≈25s)仍不生效才升级到"−删除+重启"。输入监控不再纳入首次/恢复引导，原因是实测表明其面板显示状态与 active tap 的实时可用性**不稳定等价**，首次冷启动还会出现条目不注册却实际可工作的误导场景。 |
 
 ---
 
@@ -72,10 +72,10 @@ launchd
 | **通知原生化（UN）** | ✅ | `UNUserNotificationCenter` + osascript 回退 + bundleIdentifier 防 abort；**横幅图标破图已 park** |
 | **M7：键盘捕获重构** | ✅ 代码+单测 | 回调非阻塞队列；丢 keyUp 用 `CGEventSourceKeyState` 对账自愈；fatal 单路径（删 15s 静默循环）；删 pynput/B 残骸 |
 | **M7.1：永不冻结（实测纠正）** | ✅ 撤辅助功能已实测通过 | 根因 = macOS 撤辅助功能发的是 `DisabledByTimeout`（非 `DisabledByUserInput`），旧码盲目 re-enable 死 tap → 冻结且不弹提醒。修：①不变量「默认安全态=tap 禁用=键盘正常，绝不盲目 re-enable」②`_go_fatal` 先 `CGEventTapEnable(False)` 放行再善后 ③`_on_timeout` 查 `AXIsProcessTrusted` **回调自检**打断 re-enable 死循环（无需线程）。「永不冻结」由系统超时窗+不 re-enable 保证，**不依赖外部检查** |
-| **M7.2：外部体检（自检盲区）** | ✅ 代码，待复验 | 回调死锁/撤输入监控**不送事件 → 无法自检**，必须外部探测。`listener.check_health()`（`CGEventTapIsEnabled` + `IOHIDCheckAccess` 黑盒判据）**复用 5s 心跳**（`mic_runner._heartbeat_task`→`bridge.check_health`），**砍掉专用守护线程**。撤输入监控掉权即 fatal+引导，消除「不冻但 Caps 静默失效、无提示」盲区 |
-| **M7.3：就绪通知门控** | ✅ 代码，待复验 | `result_processor` 发「CapsWriter 就绪」前同步探测两项权限，有权限问题改报「键盘接管未就绪」——不再出现「权限坏了却提示已就位」（跨平台惰性导入守卫） |
+| **M7.2：外部体检（自检盲区）** | ✅ 代码，待复验 | `listener.check_health()` 现阶段只保留 `CGEventTapIsEnabled` 这一条运行态黑盒判据，继续**复用 5s 心跳**（`mic_runner._heartbeat_task`→`bridge.check_health`），**不**再把 `IOHIDCheckAccess` 当 fatal 条件。原因：实测表明输入监控 UI/TCC 口径与 active tap 实际可用性不稳定一致，继续硬绑会误杀可工作场景。 |
+| **M7.3：就绪通知门控** | ✅ 代码，待复验 | `result_processor` 发「CapsWriter 就绪」前只同步探测辅助功能；输入监控不再作为 ready 门控，避免 restart 后把“仍可工作”的场景误报成“键盘未就绪”。 |
 | **A：server 单例守卫** | ✅ 代码+单测 | 端口自检前置到模型加载之前（`app.start()` 开头）；被占则 `os._exit(0)`（KeepAlive 不重启），避免重复实例先加载模型；删掉 launchd 下会崩的 `input("按回车")`，改兜底 exit 0。**待运行时验收** |
-| **B+C：渐进权限引导** | ✅ 代码+单测 | 新模块 `macos_permission_guide.py`：探测辅助功能(`AXIsProcessTrusted`)+输入监控(`IOHIDCheckAccess`)；逐项串行（unknown→原生弹窗 / denied→拨开关轮询 / 超时→升级删除）；接管 bridge `_handle_tap_failed`。四场景单测过。**待运行时验收** |
+| **B+C：渐进权限引导** | ✅ 代码+单测 | 新模块 `macos_permission_guide.py` 当前版本只保留辅助功能引导：unknown→原生弹窗 / denied→拨开关轮询 / 超时→升级删除；接管 bridge `_handle_tap_failed`。2026-06-16 的最新收敛是：输入监控不再参与首次/恢复引导。**待运行时验收** |
 | **通知横幅图标** | 🔲 park | 破图，下个会话受控实验（`docs/bug-report-notification-icon.md`） |
 | **D：孤儿进程（client 脱离 launchd）** | ✅ 代码+实测 | 根因：client 作为 NSApplication GUI app 被 LaunchServices 从 `com.capswriter.client` 标签**领养**到 `application.com.capswriter.client.<ASN>` 动态标签，`_launchctl_pid(原标签)`/`launchctl stop 原标签` 够不到 → stop 误判"未在运行" → 孤儿存活、start 再起一个 → 双实例。修法：`capswriter.py` 新增 `_client_pids()`（`pgrep -f` 按 .app 可执行文件路径查，**label-independent**）+ `_stop_client()`（launchctl stop 协调 KeepAlive + 按身份 SIGTERM 兜底 + 10s 后 SIGKILL）；stop/start/uninstall/status 全改走它。`restart` 实测：停旧 client→起单实例，无双图标 |
 | **P3：后端推理精度调优** | 🟡 进行中 | 聚焦 `qwen_asr_mlx`：核对 8bit/4bit 模型选择、上下文/热词能力缺口、音频前处理与解码参数差异，评估是否需要补齐能力或回退默认规格 |

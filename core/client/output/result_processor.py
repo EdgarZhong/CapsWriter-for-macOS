@@ -169,21 +169,15 @@ class ResultProcessor:
             if eb:
                 eb.update(state='ready', server_connected=True)
                 # 关键：有权限问题时绝不报「就绪/就位」——server 连上 ≠ 键盘接管可用。
-                # 同步探测两项权限（macOS），任一未授权就改报「键盘接管未就绪」，
-                # 键盘子系统会另行引导。（跨平台：仅 darwin 探测，失败一律视作 ok 不误报）
+                # 当前口径只同步探测「辅助功能」：它决定 CGEventTap 能否在新进程中建立；
+                # 「输入监控」不再作为首次/重启后的就绪门控，避免把仍可工作的场景误报成
+                # “键盘接管未就绪”。（跨平台：仅 darwin 探测，失败一律视作 ok 不误报）
                 kbd_ok = True
                 try:
                     import sys as _sys
                     if _sys.platform == 'darwin':
-                        from ..shortcut.macos_permission_guide import (
-                            check_accessibility,
-                            check_input_monitoring,
-                            HID_GRANTED,
-                        )
-                        kbd_ok = (
-                            check_accessibility()
-                            and check_input_monitoring() == HID_GRANTED
-                        )
+                        from ..shortcut.macos_permission_guide import check_accessibility
+                        kbd_ok = check_accessibility()
                 except Exception:
                     kbd_ok = True
                 if kbd_ok:

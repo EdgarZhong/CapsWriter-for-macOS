@@ -1,22 +1,22 @@
 # coding: utf-8
 """
-macOS 权限渐进引导（辅助功能 Accessibility + 输入监控 Input Monitoring）。
+macOS 权限渐进引导（仅辅助功能 Accessibility）。
 
 背景与设计见 docs/macos-architecture-decisions.md 第六节。
 
 为什么要这一层（而不是一段写死的弹窗文案）：
-1. 这个吞 F18、监听全局 keyDown/keyUp 的主动 CGEventTap，macOS 会同时要
-   「辅助功能」和「输入监控」两个权限；系统设置是**单窗口应用**，开不出两个面板，
-   所以引导必须**串行**，一次只处理一个权限。
+1. 当前阶段的产品口径已经收敛为：把「辅助功能」作为**唯一需要显式引导用户处理**的权限。
+   用户首次安装或运行期撤权后，只要把这一项处理好，再重启客户端即可重新尝试接管键盘；
+   不再把「输入监控」作为首次引导的一部分，避免把用户带到一个经常不会自动出现条目的页面。
 2. 用户肉眼**无法区分**「关着的有效条目」和「关着的失效条目（dev 重新签名后
    cdhash 对不上的旧记录）」——列表长一样、没时间戳。让用户自己判断「该删还是该拨」
    是不现实的。
 
 渐进探测式策略（用户任意时刻只面对一条明确指令，由 app 替他判断 stale）：
-- 只引导**未授权**的那项，granted 直接跳过；
+- 只引导「辅助功能」这一项，granted 直接跳过；
 - unknown（从没问过）→ 触发系统**原生授权弹窗**；
 - denied（有记录但关着）→ 打开面板、提示「把开关打开」，后台**轮询**：
-  · 轮询到生效 → 进入下一项；
+  · 轮询到生效 → 完成；
   · 超时仍不生效 → 判定为「旧记录」→ 升级提示「− 删除 → 重启 → 重新允许」。
 """
 
@@ -30,9 +30,8 @@ from collections.abc import Callable
 
 from . import logger
 
-# ---- 权限面板 URL（系统设置单窗口，第二条 URL 只会让同一窗口导航过去）----
+# ---- 权限面板 URL ----
 _PANE_ACCESSIBILITY = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-_PANE_INPUT_MONITOR = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 # ---- IOHIDCheckAccess / IOHIDRequestAccess（输入监控，IOKit C 符号）----
 # kIOHIDRequestTypeListenEvent = 1（监听类，对应键盘事件监听）
@@ -133,49 +132,57 @@ def _default_dialog(body: str, title: str) -> None:
 
 
 # ------------------------------------------------------------------
-# 单项权限的渐进引导
+# 辅助功能权限的渐进引导
 # ------------------------------------------------------------------
 
-def _is_granted(perm: str) -> bool:
-    if perm == 'accessibility':
-        return check_accessibility()
-    return check_input_monitoring() == HID_GRANTED
-
-
-def _poll_granted(perm: str, timeout: float) -> bool:
-    """在 timeout 内轮询权限是否变为已授权。"""
+def _poll_granted(timeout: float) -> bool:
+    """在 timeout 内轮询辅助功能是否变为已授权。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _is_granted(perm):
+        if check_accessibility():
             return True
         time.sleep(_POLL_INTERVAL_S)
     return False
 
 
-def _guide_one(
-    perm: str,
-    label: str,
-    pane_url: str,
-    prompt_fn: Callable[[], None],
-    notify: Callable[[str], None],
-    dialog: Callable[[str, str], None],
+def run_guide(
+    notify: Callable[[str], None] | None = None,
+    dialog: Callable[[str, str], None] | None = None,
 ) -> str:
-    """引导单个权限。返回 'granted'（已就绪）或 'need_restart'（升级到删除+重启）。"""
-    if _is_granted(perm):
-        return 'granted'
+    """仅引导「辅助功能」权限。
+
+    设计意图：
+    - 首次冷启动和运行期 fatal 都会复用本入口；
+    - 但根据最新实测，不再在这里继续串行引导「输入监控」，避免把用户带到
+      一个首次场景里通常不会直接出现 CapsWriter 条目的面板。
+
+    返回：
+    - 'all_granted'：辅助功能已就绪（仍需重启 CapsWriter 重新接管键盘）
+    - 'need_restart'：需要用户删除失效旧记录后重启
+    """
+    notify = notify or _default_notify
+    dialog = dialog or _default_dialog
+
+    label = '辅助功能'
+
+    if check_accessibility():
+        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
+        return 'all_granted'
 
     # 1) 原生弹窗：覆盖「从没问过 / 首次运行」——会按当前签名新建有效记录，最干净
-    prompt_fn()
-    if _poll_granted(perm, _PROMPT_POLL_TIMEOUT_S):
+    prompt_accessibility()
+    if _poll_granted(_PROMPT_POLL_TIMEOUT_S):
         notify(f"✅ {label} 权限已就绪")
-        return 'granted'
+        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
+        return 'all_granted'
 
     # 2) 有记录但关着：打开面板，提示「拨开关」，后台轮询（先试最轻的动作）
-    _open_pane(pane_url)
+    _open_pane(_PANE_ACCESSIBILITY)
     notify(f"请在系统设置「{label}」中打开 CapsWriter 的开关，打开后会自动检测，无需点任何按钮")
-    if _poll_granted(perm, _TOGGLE_POLL_TIMEOUT_S):
+    if _poll_granted(_TOGGLE_POLL_TIMEOUT_S):
         notify(f"✅ {label} 权限已就绪")
-        return 'granted'
+        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
+        return 'all_granted'
 
     # 3) 拨了仍不生效 = 旧记录（多见于 dev 重新签名后 cdhash 对不上）：升级到删除+重启
     dialog(
@@ -186,28 +193,3 @@ def _guide_one(
         "CapsWriter 需要重新授权",
     )
     return 'need_restart'
-
-
-def run_guide(
-    notify: Callable[[str], None] | None = None,
-    dialog: Callable[[str, str], None] | None = None,
-) -> str:
-    """串行引导「辅助功能 → 输入监控」两项权限。
-
-    返回：
-    - 'all_granted'：两项都已就绪（仍需重启 CapsWriter 重新接管键盘）
-    - 'need_restart'：某项升级到「删除+重启」，已提示用户，引导终止
-    """
-    notify = notify or _default_notify
-    dialog = dialog or _default_dialog
-
-    perms = [
-        ('accessibility', '辅助功能', _PANE_ACCESSIBILITY, prompt_accessibility),
-        ('input_monitoring', '输入监控', _PANE_INPUT_MONITOR, request_input_monitoring),
-    ]
-    for perm, label, pane, prompt_fn in perms:
-        if _guide_one(perm, label, pane, prompt_fn, notify, dialog) == 'need_restart':
-            return 'need_restart'
-
-    notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
-    return 'all_granted'
