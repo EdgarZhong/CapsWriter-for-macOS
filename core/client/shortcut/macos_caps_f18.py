@@ -24,21 +24,14 @@ from .macos_f18_listener import MacOSF18Listener
 class MacOSCapsF18Bridge:
     """在应用内部桥接 macOS 新版 Caps Lock 交互。"""
 
-    # osascript 引导弹窗文案（显示一次后就不再重复）
+    # osascript 引导弹窗文案（真故障时显示一次；单一不分叉、重启式）
     _DIALOG_SCRIPT = """\
-display dialog "CapsWriter 需要辅助功能权限
+display dialog "CapsWriter 失去了辅助功能权限，已暂停键盘接管。
 
-请在刚刚打开的「辅助功能」设置中：
-
-• 若列表中已有 CapsWriter
-  → 点「−」删除，稍等约 15 秒
-
-• 若列表中没有 CapsWriter
-  → 稍等片刻，它将自动出现
-
-看到 CapsWriter 后开启右侧开关即可。
-CapsWriter 将自动恢复，无需重启。" ¬
-    with title "CapsWriter 需要辅助功能权限" ¬
+请在刚打开的「辅助功能」设置中：
+若列表里有 CapsWriter，点「−」删除它；
+然后重启 CapsWriter，按提示重新授权即可。" ¬
+    with title "CapsWriter 需要重新授权" ¬
     buttons {"好的"} default button "好的"\
 """
 
@@ -56,7 +49,7 @@ CapsWriter 将自动恢复，无需重启。" ¬
             on_tap_failed=self._handle_tap_failed,
         )
         self._recover_lock = threading.Lock()
-        self._recovering = False    # 防止并发触发多个恢复循环
+        self._handled = False       # 真故障只处理一次（防重复弹窗/通知）
         self._dialog_shown = False  # 引导弹窗只弹一次
 
     def start(self) -> None:
@@ -75,69 +68,45 @@ CapsWriter 将自动恢复，无需重启。" ¬
         self._listener.stop()
 
     def _handle_tap_failed(self) -> None:
-        """CGEventTap 失效（启动失败或运行时被 TCC 撤销）的统一处理。"""
+        """CGEventTap 真故障（创建失败 / 运行中撤权 / RunLoop 退出）的统一处理。
+
+        采用「干净单路径」UX（见 docs/macos-architecture-decisions.md 第六节）：
+        恢复 remap → 标记不可用 + 通知 → 引导用户重授权后重启 → 停。
+        不再静默轮询重建（旧的 15s 自动恢复循环已废弃）。
+        """
         with self._recover_lock:
-            if self._recovering:
-                return  # 恢复循环已在运行，不重复触发
-            self._recovering = True
+            if self._handled:
+                return  # 已处理过，避免重复弹窗/通知
+            self._handled = True
 
-        logger.warning("[caps-f18-bridge] CGEventTap 失效，开始恢复流程")
+        logger.warning("[caps-f18-bridge] CGEventTap 真故障，恢复键盘并引导用户重授权")
 
-        # ErrorBus：标记辅助功能不可用
-        eb = getattr(self.app, 'error_bus', None)
-        if eb:
-            eb.update(accessibility_ok=False)
-
-        # 1. 恢复 hidutil remap（Caps Lock 不再映射到 F18）
+        # 1. 立刻恢复 hidutil remap（Caps Lock 变回普通键，消除"映射着但 tap 已死"的 limbo）
         if self.app.remap_session is not None:
             try:
                 self.app.remap_session.restore()
             except Exception as e:
                 logger.warning("[caps-f18-bridge] remap restore failed: %s", e)
 
-        # 2. 自动打开辅助功能设置
+        # 2. ErrorBus：标记辅助功能不可用 + 发系统通知（让故障可见，不静默）
+        eb = getattr(self.app, 'error_bus', None)
+        if eb:
+            eb.update(accessibility_ok=False)
+            eb.notify(
+                "辅助功能权限丢失，键盘接管已暂停，请重新授权后重启 CapsWriter",
+                "accessibility_lost",
+            )
+
+        # 3. 自动打开辅助功能设置
         subprocess.Popen([
             'open',
             'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
         ])
 
-        # 3. 引导弹窗（只弹一次，分支说明「列表有/无」两种情况）
+        # 4. 引导弹窗（只弹一次，单一不分叉文案：删除 → 重启 → 重授权）
         if not self._dialog_shown:
             self._dialog_shown = True
             subprocess.Popen(['osascript', '-e', self._DIALOG_SCRIPT])
-
-        # 4. 后台恢复循环：每 15s 重试，权限恢复后自动重建 tap + remap
-        threading.Thread(
-            target=self._recovery_loop,
-            daemon=True,
-            name="TapRecoveryThread",
-        ).start()
-
-    def _recovery_loop(self) -> None:
-        """后台每 15s 轮询重建 CGEventTap，成功后恢复 remap 并发通知。"""
-        import time
-        logger.info("[caps-f18-bridge] 开始自动恢复循环（每 15s 重试 CGEventTap）")
-        while True:
-            time.sleep(15)
-            if self._listener.restart():
-                logger.info("[caps-f18-bridge] CGEventTap 已恢复，重新启用 remap")
-
-                # 恢复 remap（重新激活 Caps Lock → F18 映射）
-                if self.app.remap_session is not None:
-                    try:
-                        self.app.remap_session.start()
-                    except Exception as e:
-                        logger.warning("[caps-f18-bridge] remap re-enable failed: %s", e)
-
-                # ErrorBus：标记辅助功能已恢复
-                eb = getattr(self.app, 'error_bus', None)
-                if eb:
-                    eb.update(accessibility_ok=True)
-                    eb.notify("辅助功能权限已恢复，CapsWriter 运行正常", "accessibility_restored")
-
-                with self._recover_lock:
-                    self._recovering = False
-                break
 
     def _on_down(self) -> None:
         """把 F18 / Caps Lock down 转交给短按/长按控制器。"""

@@ -45,6 +45,10 @@ launchd
 | 信号处理 | SIGTERM：set_wakeup_fd + SigtermWatcher 守护线程（NSApp.run() C RunLoop 期间 Python signal handler 无法执行）→ _critical_cleanup() → os._exit(0)；SIGINT 双击确认 |
 | 流式识别策略 | 当前阶段**不**把“产品级流式识别 / 流式显示”作为优先目标。Qwen3-ASR 的 decoder 虽具备自回归逐 token 输出能力，但要做成稳定的端到端流式体验仍需额外的 chunking、稳定前缀/不稳定尾巴管理与中间结果提交策略；现阶段先聚焦最终结果精度 |
 | MLX 后端演进路线 | 当前 `qwen_asr_mlx` 只是一层最小适配，后续精度优化主路线改为：**fork `mlx-qwen3-asr`，接管中层推理编排**（prompt 组装、language/context 策略、generation config、chunking、aligner 接法），而非继续把 `Session.transcribe()` 作为黑盒 |
+| App 图标 | `.icns` 放 `assets/icon/app-icon.icns`（源）→ 拷入 bundle `Resources/` + `Info.plist` `CFBundleIconFile=app-icon` + 重签名；`build_launcher.sh` 每次构建自动同步。LSUIElement 不进 Dock，图标体现在 Finder / 简介 / 权限列表 |
+| 通知后端 | `osascript`（归属脚本编辑器=卷轴）→ 改 **`UNUserNotificationCenter`**（CapsWriter 身份）；裸跑无 bundle 时回退 osascript；调用前用 `bundleIdentifier()` 防 abort。**横幅图标破图问题已 park**（见 `docs/bug-report-notification-icon.md`） |
+| 键盘失败处理 | 见 `docs/macos-architecture-decisions.md` 第六节。**回调非阻塞铁律**（业务甩工作线程队列）；失败分类（timeout/丢keyUp=自救带预算，撤权/创建失败/RunLoop退出=fatal）；fatal 单路径=恢复 remap+通知+引导重授权后重启，**删 15s 静默循环**；撤权时主动 `CFRunLoopStop` |
+| 权限恢复 UX | 统一指导"**−删除（若有）+ 重启 + 重授权**"，不分叉。TCC 绑签名：拨开关仅签名匹配才有效（会失败的子集），−删除永远有效（无害超集）。dev 阶段用 −；远期稳定签名可简化为拨开关 |
 
 ---
 
@@ -64,6 +68,11 @@ launchd
 | **M5：Accessibility 引导优化** | ✅ | osascript 分支弹窗（只弹一次）；15s 重试；ErrorBus wire accessibility_ok；CLI start 超时有具体提示 |
 | **SIGTERM 修复** | ✅ | set_wakeup_fd + SigtermWatcher 守护线程；_critical_cleanup() + os._exit(0)；capswriter stop 现可在几秒内干净退出 |
 | **M6：菜单栏图标** | ✅ | 自定义矢量 mark 作 template（`start_client_macos.py:_install_status_item`）：NSImage 原生读 SVG（`_NSSVGImageRep` 矢量）+ `isTemplate` 深浅自适应 + `autosaveName` 固定位置；旧系统 @2x PNG 兜底 + 文字兜底；仅图标暂不挂菜单；代码正式素材在 `assets/icon/capswriter-menubar-template.{svg,png}`（v2），设计/调试件留在 `assets/branding/` |
+| **App 图标绑定** | ✅ | icns 绑入 bundle + `Info.plist` + 重签名 + `build_launcher.sh` 自动同步；Finder/简介/权限列表显示正确 |
+| **通知原生化（UN）** | ✅ | `UNUserNotificationCenter` + osascript 回退 + bundleIdentifier 防 abort；**横幅图标破图已 park** |
+| **M7：键盘捕获重构** | ✅ 代码+单测 | 回调非阻塞队列；timeout 自救+预算；丢 keyUp 用 `CGEventSourceKeyState` 对账自愈；撤权主动 `CFRunLoopStop`；fatal 单路径（删 15s 静默循环）；删 pynput/B 残骸。**待用户运行时验收** |
+| **通知横幅图标** | 🔲 park | 破图，下个会话受控实验（`docs/bug-report-notification-icon.md`） |
+| **孤儿进程（client 脱离 launchd）** | 🔲 待修 | client 升级成 GUI app 后被 reparent 到 PPID=1，launchd 作业显示 exited 但进程仍活；`capswriter stop` 够不到。需查 NSApplication LaunchServices 注册与 launchd 监管的交互 |
 | **P3：后端推理精度调优** | 🟡 进行中 | 聚焦 `qwen_asr_mlx`：核对 8bit/4bit 模型选择、上下文/热词能力缺口、音频前处理与解码参数差异，评估是否需要补齐能力或回退默认规格 |
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |

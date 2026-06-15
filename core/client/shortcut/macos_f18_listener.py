@@ -6,11 +6,21 @@ macOS F18 监听器（主动 CGEventTap 实现）。
 防止 F18 透传到前台应用（终端等）产生 ^[[32~ 转义序列。
 
 需要 Accessibility 权限（辅助功能），这与自动粘贴共用同一权限。
+
+设计要点（详见 docs/macos-architecture-decisions.md 第六节）：
+- **回调非阻塞铁律**：tap 回调只判 keycode、吞掉 F18、把 down/up 投递到工作线程队列，
+  绝不在回调里跑业务（start/stop recording）。否则回调阻塞 → 系统挂起全局键盘 → 冻结。
+- **失败分类**（判据：re-enable 同一个 tap 能否恢复）：
+  · DisabledByTimeout：回调太慢被临时禁用 → 自救（re-enable + 物理键态对账），带预算；
+  · 状态失稳（禁用窗口内丢了 keyUp）：用 CGEventSourceKeyState 对账，补投 up 自愈；
+  · DisabledByUserInput / 创建失败 / RunLoop 退出：真故障 → 回调上层（恢复 remap + 引导 + 停）。
 """
 
 from __future__ import annotations
 
+import queue
 import threading
+import time
 from collections.abc import Callable
 
 import Quartz
@@ -24,17 +34,20 @@ _F18_KEYCODE = 0x4F
 _kCGKeyboardEventKeycode = 9
 
 # 系统禁用 CGEventTap 时发送的特殊事件类型
-_kCGEventTapDisabledByTimeout   = 0xFFFFFFFE  # tap 回调超时，可尝试重新启用
-_kCGEventTapDisabledByUserInput = 0xFFFFFFFF  # TCC 权限被撤销，重新启用无效
+_kCGEventTapDisabledByTimeout   = 0xFFFFFFFE  # tap 回调超时，可尝试重新启用（自救）
+_kCGEventTapDisabledByUserInput = 0xFFFFFFFF  # TCC 权限被撤销，重新启用无效（真故障）
+
+# timeout 自救预算：窗口内 timeout 次数达到阈值则升级为 fatal，避免无限静默打转
+_TIMEOUT_BUDGET_WINDOW_S = 5.0
+_TIMEOUT_BUDGET_MAX = 3
 
 
 class MacOSF18Listener:
     """
     主动 CGEventTap 实现的 F18 监听器。
 
-    - 监听 keyDown / keyUp
-    - 识别到 F18 时调用回调，并返回 None 吞掉事件（终端不再收到 ^[[32~）
-    - 非 F18 事件原样透传
+    - 监听 keyDown / keyUp，识别到 F18 时吞掉事件（终端不再收到 ^[[32~）
+    - 业务回调（on_down / on_up）在独立工作线程执行，tap 回调本身保持 O(1) 不阻塞
     """
 
     def __init__(
@@ -45,7 +58,7 @@ class MacOSF18Listener:
     ) -> None:
         self._on_down = on_down
         self._on_up = on_up
-        # CGEventTap 不可用（启动失败或运行时被撤销）时的回调
+        # CGEventTap 不可用（创建失败 / 运行时撤权 / RunLoop 退出）时的真故障回调
         self._on_tap_failed = on_tap_failed
         self._pressed = False
         self._lock = threading.Lock()
@@ -58,6 +71,14 @@ class MacOSF18Listener:
         # 保留 callback 引用，防止被 GC 回收（PyObjC 直接接受 Python callable）
         self._callback_ref = self._tap_callback
 
+        # 业务分发：tap 回调只入队，工作线程消费，保证回调绝不阻塞输入管道
+        self._event_queue: queue.Queue[str] = queue.Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._worker_started = False
+
+        # timeout 自救预算（最近若干次 timeout 的时间戳）
+        self._timeout_times: list[float] = []
+
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
@@ -67,32 +88,17 @@ class MacOSF18Listener:
         if self._tap is not None:
             return
 
-        # 监听 keyDown 和 keyUp
-        mask = (
-            Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
-            | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
-        )
+        self._ensure_worker()
 
-        self._tap = Quartz.CGEventTapCreate(
-            Quartz.kCGHIDEventTap,          # 在 HID 层拦截
-            Quartz.kCGHeadInsertEventTap,    # 插在最前面
-            Quartz.kCGEventTapOptionDefault, # 主动 tap（可吞事件）
-            mask,
-            self._callback_ref,
-            None,
-        )
-
+        self._tap = self._create_tap()
         if self._tap is None:
             logger.warning(
                 "[f18-listener] CGEventTap 创建失败，请确认已授权辅助功能（Accessibility）权限。"
             )
-            self._start_fallback()
+            self._handle_tap_unavailable()  # 真故障：启动即无权限
             return
 
-        self._run_loop_source = Quartz.CFMachPortCreateRunLoopSource(
-            None, self._tap, 0
-        )
-
+        self._run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, self._tap, 0)
         self._thread = threading.Thread(
             target=self._run_loop_thread,
             daemon=True,
@@ -117,46 +123,58 @@ class MacOSF18Listener:
 
         logger.info("[f18-listener] stopped")
 
-    def restart(self) -> bool:
-        """尝试重建 CGEventTap。供恢复循环调用，成功返回 True。"""
-        # 清理残留状态
-        if self._run_loop is not None:
-            Quartz.CFRunLoopStop(self._run_loop)
-            self._run_loop = None
+    # ------------------------------------------------------------------
+    # 内部：tap 创建
+    # ------------------------------------------------------------------
 
-        self._stopping = False
-        self._tap = None
-        self._run_loop_source = None
-        with self._lock:
-            self._pressed = False
-
+    def _create_tap(self):
+        """创建主动型 CGEventTap（HID 层、头插、可吞事件），失败返回 None。"""
         mask = (
             Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
             | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
         )
-        self._tap = Quartz.CGEventTapCreate(
-            Quartz.kCGHIDEventTap,
-            Quartz.kCGHeadInsertEventTap,
-            Quartz.kCGEventTapOptionDefault,
+        return Quartz.CGEventTapCreate(
+            Quartz.kCGHIDEventTap,            # 在 HID 层拦截
+            Quartz.kCGHeadInsertEventTap,     # 插在最前面
+            Quartz.kCGEventTapOptionDefault,  # 主动 tap（可吞事件）
             mask,
             self._callback_ref,
             None,
         )
-        if self._tap is None:
-            return False
-
-        self._run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, self._tap, 0)
-        self._thread = threading.Thread(
-            target=self._run_loop_thread,
-            daemon=True,
-            name="F18EventTapThread",
-        )
-        self._thread.start()
-        logger.info("[f18-listener] CGEventTap restarted successfully")
-        return True
 
     # ------------------------------------------------------------------
-    # 内部实现
+    # 内部：业务分发工作线程（保证 tap 回调不阻塞）
+    # ------------------------------------------------------------------
+
+    def _ensure_worker(self) -> None:
+        if self._worker_started:
+            return
+        self._worker_started = True
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="F18DispatchThread",
+        )
+        self._worker_thread.start()
+
+    def _worker_loop(self) -> None:
+        """消费 down / up 事件，在工作线程跑业务（start/stop recording），与 tap 回调彻底解耦。
+
+        即便业务里有慢操作（收尾音频、发 websocket），也只会让后续事件在队列里排队，
+        绝不会阻塞 tap 回调本身 → 系统永远不会因为我们而挂起键盘。
+        """
+        while True:
+            item = self._event_queue.get()
+            try:
+                if item == 'down':
+                    self._on_down()
+                elif item == 'up':
+                    self._on_up()
+            except Exception as e:
+                logger.warning("[f18-listener] 业务回调异常: %s", e)
+
+    # ------------------------------------------------------------------
+    # 内部：RunLoop
     # ------------------------------------------------------------------
 
     def _run_loop_thread(self) -> None:
@@ -168,43 +186,35 @@ class MacOSF18Listener:
             Quartz.kCFRunLoopDefaultMode,
         )
         Quartz.CGEventTapEnable(self._tap, True)
-        Quartz.CFRunLoopRun()   # 阻塞，直到 CFRunLoopStop 被调用或 tap 被系统撤销
+        Quartz.CFRunLoopRun()   # 阻塞，直到 CFRunLoopStop 或 tap 被作废
 
-        # CFRunLoop 退出：若非主动 stop()，说明 tap 被系统撤销（TCC 权限收回）
-        if not self._stopping and self._on_tap_failed is not None:
-            logger.warning("[f18-listener] CFRunLoop exited unexpectedly – tap likely revoked by TCC")
+        # CFRunLoop 退出：若非主动 stop()，即真故障（撤权 / timeout 预算耗尽 / tap 作废）
+        if not self._stopping:
+            logger.warning("[f18-listener] CFRunLoop exited – tap unavailable, escalating to fatal")
             self._tap = None
             self._run_loop_source = None
             self._run_loop = None
-            threading.Thread(
-                target=self._on_tap_failed,
-                daemon=True,
-                name="TapFailedCallback",
-            ).start()
+            self._handle_tap_unavailable()
+
+    # ------------------------------------------------------------------
+    # 内部：tap 回调（必须保持 O(1) 不阻塞）
+    # ------------------------------------------------------------------
 
     def _tap_callback(self, proxy, event_type, event, _user_info):
-        """
-        CGEventTap 回调。
-
-        - F18 keyDown：调用 on_down，返回 None 吞掉事件
-        - F18 keyUp：调用 on_up，返回 None 吞掉事件
-        - 其他事件：原样返回（透传）
-        - Disabled 事件：尝试重新启用（超时）或忽略（TCC 撤销，RunLoop 退出后由线程处理）
-        """
-        # 处理 tap 被系统禁用的特殊事件（event 参数在此情况下为 NULL，不能访问）
+        """CGEventTap 回调：识别 F18 → 吞掉并入队；禁用事件 → 按分类自救或上报。"""
+        # 处理 tap 被系统禁用的特殊事件（此情况下 event 参数为 NULL，不能访问）
         if event_type == _kCGEventTapDisabledByTimeout:
-            logger.warning("[f18-listener] tap disabled by timeout, re-enabling")
-            if self._tap is not None and not self._stopping:
-                Quartz.CGEventTapEnable(self._tap, True)
+            self._on_timeout()
             return None
         if event_type == _kCGEventTapDisabledByUserInput:
-            # TCC 权限被撤销；不尝试重新启用（会失败）
-            # RunLoop 在此之后会自动退出，由 _run_loop_thread 的 _on_tap_failed 处理
-            logger.warning("[f18-listener] tap disabled by user input (TCC revoked)")
+            # TCC 权限被撤销：主动停 RunLoop（不再依赖"会自动退出"的错误假设），
+            # 让 _run_loop_thread 走真故障处理（恢复 remap + 引导 + 停）。
+            logger.warning("[f18-listener] tap disabled by user input (TCC revoked) – stopping run loop")
+            if self._run_loop is not None:
+                Quartz.CFRunLoopStop(self._run_loop)
             return None
 
         keycode = Quartz.CGEventGetIntegerValueField(event, _kCGKeyboardEventKeycode)
-
         if keycode != _F18_KEYCODE:
             return event  # 非 F18，透传
 
@@ -213,100 +223,77 @@ class MacOSF18Listener:
                 if self._pressed:
                     return None  # 长按重复触发，吞掉
                 self._pressed = True
-            logger.info("[f18-listener] F18 down")
-            self._on_down()
-            return None  # 吞掉，不透传给前台应用
+            self._event_queue.put('down')  # 业务甩到工作线程，回调立即返回
+            return None
 
         if event_type == Quartz.kCGEventKeyUp:
             with self._lock:
                 if not self._pressed:
                     return None
                 self._pressed = False
-            logger.info("[f18-listener] F18 up")
-            self._on_up()
-            return None  # 吞掉
+            self._event_queue.put('up')
+            return None
 
         return event
 
+    def _on_timeout(self) -> None:
+        """tap 超时被禁用：自救（re-enable + 物理键态对账），并按预算判定是否升级 fatal。"""
+        logger.warning("[f18-listener] tap disabled by timeout, re-enabling")
+        if self._stopping or self._tap is None:
+            return
+
+        # 预算：窗口内 timeout 次数过多，说明不是偶发慢回调 → 升级 fatal
+        now = time.monotonic()
+        self._timeout_times = [t for t in self._timeout_times if now - t <= _TIMEOUT_BUDGET_WINDOW_S]
+        self._timeout_times.append(now)
+        if len(self._timeout_times) >= _TIMEOUT_BUDGET_MAX:
+            logger.warning(
+                "[f18-listener] timeout 预算耗尽（%ds 内 %d 次），升级为 fatal",
+                int(_TIMEOUT_BUDGET_WINDOW_S), len(self._timeout_times),
+            )
+            if self._run_loop is not None:
+                Quartz.CFRunLoopStop(self._run_loop)
+            return
+
+        Quartz.CGEventTapEnable(self._tap, True)
+        self._reconcile_press_state()
+
+    def _reconcile_press_state(self) -> None:
+        """对账内存态与物理键态。
+
+        tap 被禁用的窗口内可能丢失了 keyUp，导致 _pressed（及上层 _is_down）永久卡在按下，
+        表现为"松手后录音停不下、之后短按长按全失灵"。这里查物理 F18 键态：
+        若内存认为按下、物理已松开 → 补投一个 up，停掉卡住的录音、清状态。
+        """
+        try:
+            physically_down = Quartz.CGEventSourceKeyState(
+                Quartz.kCGEventSourceStateHIDSystemState, _F18_KEYCODE
+            )
+        except Exception:
+            return
+        with self._lock:
+            stuck = self._pressed and not physically_down
+            if stuck:
+                self._pressed = False
+        if stuck:
+            logger.warning("[f18-listener] 检测到丢失的 keyUp（_pressed=True 但物理已松开），补投 up 自愈")
+            self._event_queue.put('up')
+
     # ------------------------------------------------------------------
-    # 回退：Accessibility 权限未授权时降级用 pynput
+    # 内部：真故障上报（创建失败 / 撤权 / RunLoop 退出，统一走上层 fatal 单路径）
     # ------------------------------------------------------------------
 
-    def _start_fallback(self) -> None:
-        """CGEventTap 不可用：通知上层（恢复 remap、通知用户、启动恢复循环），不再静默降级。"""
+    def _handle_tap_unavailable(self) -> None:
+        """CGEventTap 不可用：上报上层（恢复 remap、引导用户重授权后重启），不再静默降级。"""
         if self._on_tap_failed is not None:
-            self._on_tap_failed()
+            # 在独立线程回调，避免占用 RunLoop 线程
+            threading.Thread(
+                target=self._on_tap_failed,
+                daemon=True,
+                name="TapFailedCallback",
+            ).start()
         else:
             logger.error(
                 "[f18-listener] CGEventTap 不可用且无 on_tap_failed 回调，"
-                "Caps Lock 监听已停止工作。请授权辅助功能（Accessibility）权限后重启。"
+                "Caps Lock 监听已停止。请授权辅助功能（Accessibility）后重启。"
             )
-
-    def _start_caps_lock_fallback(self) -> None:
-        """remap 已恢复后，用 pynput 被动监听原始 Caps Lock 按键。"""
-        from pynput import keyboard
-
-        def on_press(key):
-            if key != keyboard.Key.caps_lock:
-                return
-            with self._lock:
-                if self._pressed:
-                    return
-                self._pressed = True
-            logger.info("[f18-listener] Caps Lock down (direct fallback)")
-            self._on_down()
-
-        def on_release(key):
-            if key != keyboard.Key.caps_lock:
-                return
-            with self._lock:
-                if not self._pressed:
-                    return
-                self._pressed = False
-            logger.info("[f18-listener] Caps Lock up (direct fallback)")
-            self._on_up()
-
-        self._fallback_listener = keyboard.Listener(
-            on_press=on_press,
-            on_release=on_release,
-        )
-        self._fallback_listener.start()
-        logger.info(
-            "[f18-listener] pynput Caps Lock 直接监听已启动（降级模式："
-            "短按由 macOS 自然处理，长按触发录音）"
-        )
-
-    def _start_f18_fallback(self) -> None:
-        """旧行为：remap 保持激活，pynput 被动监听 F18（F18 事件会透传）。"""
-        from pynput import keyboard
-
-        def _is_f18(key) -> bool:
-            key_name = getattr(key, "name", None)
-            return key == getattr(keyboard.Key, "f18", None) or key_name == "f18"
-
-        def on_press(key):
-            if not _is_f18(key):
-                return
-            with self._lock:
-                if self._pressed:
-                    return
-                self._pressed = True
-            logger.info("[f18-listener] F18 down (f18 fallback)")
-            self._on_down()
-
-        def on_release(key):
-            if not _is_f18(key):
-                return
-            with self._lock:
-                if not self._pressed:
-                    return
-                self._pressed = False
-            logger.info("[f18-listener] F18 up (f18 fallback)")
-            self._on_up()
-
-        self._fallback_listener = keyboard.Listener(
-            on_press=on_press,
-            on_release=on_release,
-        )
-        self._fallback_listener.start()
-        logger.info("[f18-listener] pynput F18 fallback started")
