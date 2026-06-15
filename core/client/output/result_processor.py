@@ -167,19 +167,23 @@ class ResultProcessor:
 
             # 连接成功：更新状态并发通知
             if eb:
-                eb.update(state='ready', server_connected=True)
                 # 关键：有权限问题时绝不报「就绪/就位」——server 连上 ≠ 键盘接管可用。
-                # 当前口径只同步探测「辅助功能」：它决定 CGEventTap 能否在新进程中建立；
-                # 「输入监控」不再作为首次/重启后的就绪门控，避免把仍可工作的场景误报成
-                # “键盘接管未就绪”。（跨平台：仅 darwin 探测，失败一律视作 ok 不误报）
+                # 这里不再用权限探测去“猜”键盘是否可用，而是优先读取 bridge 的真实运行态：
+                # 只有 active CGEventTap 已成功建立，客户端才算 ready；否则即便服务端连接成功，
+                # 也只能算“识别引擎已连上，但键盘接管未就绪”。
                 kbd_ok = True
                 try:
                     import sys as _sys
                     if _sys.platform == 'darwin':
-                        from ..shortcut.macos_permission_guide import check_accessibility
-                        kbd_ok = check_accessibility()
+                        bridge = getattr(self.app, 'macos_caps_bridge', None)
+                        if bridge is not None:
+                            kbd_ok = bridge.is_tap_available()
                 except Exception:
                     kbd_ok = True
+                eb.update(
+                    state='ready' if kbd_ok else 'error',
+                    server_connected=True,
+                )
                 if kbd_ok:
                     eb.notify("识别引擎已连接，CapsWriter 就绪", "server_connected")
                 else:

@@ -50,6 +50,15 @@ class MacOSCapsF18Bridge:
             tap_ok = self._listener._tap is not None
             eb.update(accessibility_ok=tap_ok)
 
+    def is_tap_available(self) -> bool:
+        """返回当前键盘接管是否真的已建立。
+
+        这里故意不看「辅助功能」布尔值，而是直接看底层 listener 是否持有已创建的 tap。
+        原因：最近实测表明，TCC / 系统设置里的权限显示状态与「本次启动是否已经成功建起
+        active CGEventTap」不是一回事；只有 tap 真建起来，才能把客户端视为“键盘已就绪”。
+        """
+        return self._listener._tap is not None
+
     def stop(self) -> None:
         """停止 F18 监听。"""
         logger.info("macOS Caps F18 bridge stopping")
@@ -67,7 +76,7 @@ class MacOSCapsF18Bridge:
         """CGEventTap 真故障（创建失败 / 运行中撤权 / RunLoop 退出）的统一处理。
 
         采用「干净单路径 + 渐进权限引导」UX（见 docs/macos-architecture-decisions.md 第六节）：
-        恢复 remap → 标记不可用 + 通知 → 渐进引导（仅探测辅助功能权限）→ 提示重启。
+        恢复 remap → 标记不可用 + 通知 → 渐进引导（默认辅助功能，必要时补输入监控）→ 提示重启。
         不再静默轮询重建（旧的 15s 自动恢复循环已废弃）。
 
         本方法已在独立线程（TapFailedCallback）执行，run_guide 内部的轮询/等待阻塞无碍。
@@ -91,11 +100,13 @@ class MacOSCapsF18Bridge:
         if eb:
             eb.update(accessibility_ok=False)
             eb.notify(
-                "键盘接管已暂停，正在引导你检查辅助功能权限",
+                "键盘接管已暂停，正在引导你检查键盘接管权限",
                 "permission_lost",
             )
 
-        # 3. 渐进权限引导：只探测辅助功能真实状态，避免首次冷启动误导到输入监控页面
+        # 3. 渐进权限引导：默认只处理辅助功能；若系统已登记输入监控条目且当前为关闭，
+        #    则补一段输入监控引导。这样既不误导首次冷启动，也能覆盖“条目已出现但关闭”
+        #    导致新进程建不起 tap 的场景。
         def _notify(msg: str) -> None:
             if eb:
                 # ErrorBus 按 key 做 30s 去重；引导的多条文案集中在 ~50s 内，

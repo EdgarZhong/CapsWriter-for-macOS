@@ -1,13 +1,14 @@
 # coding: utf-8
 """
-macOS 权限渐进引导（仅辅助功能 Accessibility）。
+macOS 权限渐进引导（默认辅助功能，必要时补输入监控）。
 
 背景与设计见 docs/macos-architecture-decisions.md 第六节。
 
 为什么要这一层（而不是一段写死的弹窗文案）：
-1. 当前阶段的产品口径已经收敛为：把「辅助功能」作为**唯一需要显式引导用户处理**的权限。
-   用户首次安装或运行期撤权后，只要把这一项处理好，再重启客户端即可重新尝试接管键盘；
-   不再把「输入监控」作为首次引导的一部分，避免把用户带到一个经常不会自动出现条目的页面。
+1. 当前阶段的产品口径已经收敛为：把「辅助功能」作为**默认唯一需要显式引导用户处理**的权限。
+   用户首次安装或运行期撤权后，优先只处理这一项，再重启客户端重新尝试接管键盘。
+   只有在系统已经把 CapsWriter 明确登记到「输入监控」列表且状态为关闭时，才会额外把用户路由到
+   输入监控面板；避免把首次冷启动里还没出现条目的场景误导过去。
 2. 用户肉眼**无法区分**「关着的有效条目」和「关着的失效条目（dev 重新签名后
    cdhash 对不上的旧记录）」——列表长一样、没时间戳。让用户自己判断「该删还是该拨」
    是不现实的。
@@ -32,6 +33,7 @@ from . import logger
 
 # ---- 权限面板 URL ----
 _PANE_ACCESSIBILITY = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+_PANE_INPUT_MONITOR = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 # ---- IOHIDCheckAccess / IOHIDRequestAccess（输入监控，IOKit C 符号）----
 # kIOHIDRequestTypeListenEvent = 1（监听类，对应键盘事件监听）
@@ -135,7 +137,7 @@ def _default_dialog(body: str, title: str) -> None:
 # 辅助功能权限的渐进引导
 # ------------------------------------------------------------------
 
-def _poll_granted(timeout: float) -> bool:
+def _poll_accessibility_granted(timeout: float) -> bool:
     """在 timeout 内轮询辅助功能是否变为已授权。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -143,6 +145,51 @@ def _poll_granted(timeout: float) -> bool:
             return True
         time.sleep(_POLL_INTERVAL_S)
     return False
+
+
+def _poll_input_monitoring_granted(timeout: float) -> bool:
+    """在 timeout 内轮询输入监控是否变为 granted。
+
+    只在系统已经明确把 CapsWriter 登记到输入监控列表且状态为 denied 时才调用。
+    对首次冷启动 / 仍未出现条目的场景，不再借此硬性引导用户。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if check_input_monitoring() == HID_GRANTED:
+            return True
+        time.sleep(_POLL_INTERVAL_S)
+    return False
+
+
+def _finalize_after_accessibility_ready(
+    notify: Callable[[str], None],
+    dialog: Callable[[str, str], None],
+) -> str:
+    """辅助功能已就绪后的收尾分支。
+
+    默认直接提示重启；只有在系统已把 CapsWriter 明确登记到输入监控列表且状态=denied 时，
+    才说明当前新进程还额外受输入监控条目约束，并把用户路由到对应面板。
+    """
+    input_monitoring_state = check_input_monitoring()
+    if input_monitoring_state != HID_DENIED:
+        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
+        return 'all_granted'
+
+    notify("检测到系统已将 CapsWriter 登记到「输入监控」列表，但开关当前为关闭状态")
+    _open_pane(_PANE_INPUT_MONITOR)
+    notify("请在系统设置「输入监控」中打开 CapsWriter 的开关，打开后会自动检测，无需点任何按钮")
+    if _poll_input_monitoring_granted(_TOGGLE_POLL_TIMEOUT_S):
+        notify("✅ 输入监控 权限已就绪")
+        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
+        return 'all_granted'
+
+    dialog(
+        "CapsWriter 在「输入监控」列表中的开关仍未生效。\n\n"
+        "如果列表里已经有 CapsWriter，请把开关打开后再重启客户端；\n"
+        "若你刚刚完成了权限切换，也可以先退出系统设置并再次重启 CapsWriter 复测。",
+        "CapsWriter 仍未完成键盘接管",
+    )
+    return 'need_restart'
 
 
 def run_guide(
@@ -153,8 +200,9 @@ def run_guide(
 
     设计意图：
     - 首次冷启动和运行期 fatal 都会复用本入口；
-    - 但根据最新实测，不再在这里继续串行引导「输入监控」，避免把用户带到
-      一个首次场景里通常不会直接出现 CapsWriter 条目的面板。
+    - 默认只处理辅助功能；
+    - 但如果辅助功能已经就绪、且系统已明确把 CapsWriter 登记到「输入监控」列表并显示为
+      denied，则补一段输入监控引导，覆盖“条目已出现但关闭时新进程始终建不起 tap”的场景。
 
     返回：
     - 'all_granted'：辅助功能已就绪（仍需重启 CapsWriter 重新接管键盘）
@@ -166,23 +214,20 @@ def run_guide(
     label = '辅助功能'
 
     if check_accessibility():
-        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
-        return 'all_granted'
+        return _finalize_after_accessibility_ready(notify, dialog)
 
     # 1) 原生弹窗：覆盖「从没问过 / 首次运行」——会按当前签名新建有效记录，最干净
     prompt_accessibility()
-    if _poll_granted(_PROMPT_POLL_TIMEOUT_S):
+    if _poll_accessibility_granted(_PROMPT_POLL_TIMEOUT_S):
         notify(f"✅ {label} 权限已就绪")
-        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
-        return 'all_granted'
+        return _finalize_after_accessibility_ready(notify, dialog)
 
     # 2) 有记录但关着：打开面板，提示「拨开关」，后台轮询（先试最轻的动作）
     _open_pane(_PANE_ACCESSIBILITY)
     notify(f"请在系统设置「{label}」中打开 CapsWriter 的开关，打开后会自动检测，无需点任何按钮")
-    if _poll_granted(_TOGGLE_POLL_TIMEOUT_S):
+    if _poll_accessibility_granted(_TOGGLE_POLL_TIMEOUT_S):
         notify(f"✅ {label} 权限已就绪")
-        notify("✅ 权限已就绪，请重启 CapsWriter 以重新接管键盘")
-        return 'all_granted'
+        return _finalize_after_accessibility_ready(notify, dialog)
 
     # 3) 拨了仍不生效 = 旧记录（多见于 dev 重新签名后 cdhash 对不上）：升级到删除+重启
     dialog(

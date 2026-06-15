@@ -427,10 +427,13 @@ def cmd_start(args) -> int:
             print("  ✗ 客户端 30s 内未启动，请检查日志：")
             print(f"    cat {LOG_DIR / 'client.stderr.log'}")
         elif s.get('accessibility_ok') is False and s.get('state') != 'ready':
-            # 特定场景：辅助功能权限未授权导致 CGEventTap 无法建立
-            print("  ✗ 辅助功能权限未授权，系统设置已自动打开")
-            print("    请在「辅助功能」列表中找到 CapsWriter 并开启授权，")
-            print("    授权后 CapsWriter 将自动恢复，无需重启。")
+            # 注意：accessibility_ok 在当前实现里表示“键盘接管是否已建立”，
+            # 不是单纯的“辅助功能是否已授权”。只要 tap 没建起来，这里就应给出
+            # 泛化的键盘接管失败提示，而不能武断地说成“辅助功能未授权”。
+            print("  ✗ 客户端未完成键盘接管，系统设置已自动打开")
+            print("    请先确认「辅助功能」中 CapsWriter 已开启；")
+            print("    如果「输入监控」列表里已经出现 CapsWriter 且开关关闭，也请一并开启。")
+            print("    完成后需要重启 CapsWriter，当前版本不会在同一进程内自动恢复。")
         else:
             print(f"  ✗ 客户端超时（当前状态：{s.get('state', '?')}），请检查日志：")
             print(f"    cat {LOG_DIR / 'client.stderr.log'}")
@@ -510,7 +513,7 @@ def cmd_status(args) -> int:
         print(f"  CapsWriter for macOS  [{state_label}]")
         print(f"  识别引擎    : {'已连接 ✓' if status.get('server_connected') else '未连接'}"
               + (f' (port 6016 {"就绪" if server_port else "不可达"})' if server_pid else ''))
-        print(f"  辅助功能    : {'已授权 ✓' if status.get('accessibility_ok') else '未授权'}")
+        print(f"  键盘接管    : {'已建立 ✓' if status.get('accessibility_ok') else '未建立'}")
         print(f"  麦克风      : {'已授权 ✓' if status.get('microphone_ok') else '未授权'}")
 
         # 运行时长
