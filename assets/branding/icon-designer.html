@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CapsWriter Icon Designer</title>
+<style>
+  :root { --bg:#1c1f24; --panel:#262b32; --line:#3a4048; --txt:#e6e9ee; --muted:#9aa3ad; --accent:#5b9dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.4 -apple-system,"PingFang SC",Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--txt); display:flex; min-height:100vh; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:24px; }
+  #board { width:min(74vh,680px); aspect-ratio:1/1; border-radius:12px; overflow:hidden;
+           background:repeating-conic-gradient(#2a2f36 0% 25%, #232830 0% 50%) 50%/22px 22px;
+           box-shadow:0 8px 30px rgba(0,0,0,.4); }
+  svg { width:100%; height:100%; display:block; }
+  #panel { width:336px; background:var(--panel); border-left:1px solid var(--line);
+           padding:16px; overflow-y:auto; height:100vh; }
+  h1 { font-size:14px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:11px; margin:0 0 10px; }
+  #status { font-size:11px; color:var(--accent); background:#1f2530; border:1px solid var(--line);
+            border-radius:6px; padding:6px 8px; margin:0 0 12px; min-height:28px; }
+  .seltabs { display:flex; gap:6px; margin:0 0 12px; }
+  .seltabs button { flex:1; }
+  .seltabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  fieldset { border:1px solid var(--line); border-radius:8px; margin:0 0 12px; padding:8px 10px 10px; }
+  legend { color:var(--accent); font-size:11px; font-weight:600; padding:0 4px; letter-spacing:.5px; }
+  .row { display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .row label { width:62px; color:var(--muted); flex:none; }
+  .row input[type=range] { flex:1; }
+  .row .val { width:40px; text-align:right; font-variant-numeric:tabular-nums; }
+  .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+  button { background:#333a43; color:var(--txt); border:1px solid var(--line); border-radius:6px;
+           padding:7px 10px; cursor:pointer; font-size:12px; }
+  button:hover { background:#3d454f; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .chk { display:flex; align-items:center; gap:6px; color:var(--muted); margin:6px 0; }
+  .hint { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.6; }
+</style>
+</head>
+<body>
+  <div id="stage"><div id="board"><svg id="svg" viewBox="0 0 100 100"></svg></div></div>
+  <div id="panel">
+    <h1>CapsWriter Icon Designer</h1>
+    <p class="sub">点画布上的图形选中→拖控制点;或用滑块精调。仅显示当前选中图形的控制点。</p>
+    <div id="status">未选中</div>
+    <div class="seltabs">
+      <button data-sel="bubble">气泡</button>
+      <button data-sel="caps">Caps</button>
+      <button data-sel="wave">波形</button>
+    </div>
+    <div id="controls"></div>
+
+    <fieldset><legend>选项 & 导出</legend>
+      <label class="chk"><input type="checkbox" id="opt-transparent"> 透明背景(白 ink / 菜单栏 template)</label>
+      <label class="chk"><input type="checkbox" id="opt-handles" checked> 显示控制点</label>
+      <div class="btns">
+        <button id="btn-undo" title="⌘Z">↶ 撤销</button>
+        <button id="btn-redo" title="⌘⇧Z">↷ 重做</button>
+        <button class="primary" id="btn-svg">导出 SVG</button>
+        <button class="primary" id="btn-png">导出 PNG</button>
+        <button id="btn-params">复制参数</button>
+        <button id="btn-reset">重置</button>
+      </div>
+    </fieldset>
+    <p class="hint">□ 白方块=改宽/高(边=单轴,角=双轴) · ◆ 蓝菱=身体宽 · ◆ 青菱=三角/身体高分界 · ◆ 绿菱=圆角 · 🟧 尖角尖端 · ⚪ 尖角底点(吸附气泡边)。拖图形身体=移动。</p>
+  </div>
+
+<script>
+"use strict";
+const SVG = document.getElementById('svg');
+const NS = "http://www.w3.org/2000/svg";
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const f=n=>(+n).toFixed(2);
+
+// ===== 默认状态(含可调的锁定比例) =====
+const DEF = () => ({
+  icon:   { x:3, y:3, w:94, h:94, r:22 },
+  bubble: { cx:58, cy:32, w:64, h:48, r:14 },
+  caps:   { cx:30, cy:49, headW:34, stemW:15, h:54, out:4,
+            headFrac:0.50, arrowFrac:0.62, barFrac:0.24, barRatio:1.6 },
+  wave:   { cx:74, cy:30, n:4, span:26, h:24, t:5 },
+  tail:   { b1:{x:44,y:56}, b2:{x:60,y:56}, tip:{x:36,y:67} },
+});
+let S = DEF();
+let SEL = 'caps';          // 当前选中图形
+let drag = null;          // 当前拖拽:{type, ...}
+
+// ===== 撤销/重做 =====
+const clone = o => JSON.parse(JSON.stringify(o));
+let HIST = [clone(S)], HI = 0;
+function commit(){ if(JSON.stringify(S)===JSON.stringify(HIST[HI])) return;
+  HIST = HIST.slice(0,HI+1); HIST.push(clone(S)); HI=HIST.length-1; }
+function undo(){ if(HI>0){ HI--; S=clone(HIST[HI]); render(); } }
+function redo(){ if(HI<HIST.length-1){ HI++; S=clone(HIST[HI]); render(); } }
+
+// ===== 滑块(按选中图形分组显示) =====
+const SLIDERS = {
+  bubble: [['bubble.cx','x',20,92,0.5],['bubble.cy','y',8,72,0.5],
+           ['bubble.w','宽',20,94,0.5],['bubble.h','高',16,88,0.5],['bubble.r','圆角',0,40,0.5]],
+  caps:   [['caps.cx','x',4,92,0.5],['caps.cy','y',14,90,0.5],
+           ['caps.headW','箭头宽',6,82,0.5],['caps.stemW','身体宽',2,44,0.5],
+           ['caps.h','总高',16,92,0.5],['caps.out','勾边',0,12,0.25],
+           ['caps.headFrac','三角占箭头',0.2,0.8,0.01],['caps.arrowFrac','箭头占总高',0.4,0.85,0.01],
+           ['caps.barFrac','底块占总高',0.08,0.4,0.01],['caps.barRatio','底块/身宽',1,2.6,0.05]],
+  wave:   [['wave.cx','x',20,96,0.5],['wave.cy','y',8,64,0.5],
+           ['wave.n','条数',3,6,1],['wave.span','整体宽',4,60,0.5],
+           ['wave.h','整体高',3,56,0.5],['wave.t','粗细',1,14,0.25]],
+};
+const getP = p => p.split('.').reduce((o,k)=>o[k], S);
+const setP = (p,v) => { const ks=p.split('.'); let o=S; for(let i=0;i<ks.length-1;i++) o=o[ks[i]]; o[ks.at(-1)]=v; };
+
+// ===== Caps Lock 字形(整体一个单位;隔断白缝=身体宽,最少量) =====
+function capsParts(c){
+  const H=c.h, y0=c.cy-H/2, cx=c.cx;
+  const aF=c.arrowFrac, bF=c.barFrac, gF=Math.max(0.02,1-aF-bF);
+  const arrowH=H*aF, headH=arrowH*c.headFrac, stemBot=y0+arrowH;
+  const gapBot=stemBot+H*gF, barBot=gapBot+H*bF;
+  const hw=c.headW/2, sw=c.stemW/2, bw=(c.stemW*c.barRatio)/2, hy=y0+headH;
+  const arrow=`M${f(cx)} ${f(y0)} L${f(cx+hw)} ${f(hy)} L${f(cx+sw)} ${f(hy)} L${f(cx+sw)} ${f(stemBot)} L${f(cx-sw)} ${f(stemBot)} L${f(cx-sw)} ${f(hy)} L${f(cx-hw)} ${f(hy)} Z`;
+  const bar=`M${f(cx-bw)} ${f(gapBot)} L${f(cx+bw)} ${f(gapBot)} L${f(cx+bw)} ${f(barBot)} L${f(cx-bw)} ${f(barBot)} Z`;
+  // 白缝桥接:按身体(stem)宽,最少量白
+  const bridge=`M${f(cx-sw)} ${f(stemBot)} L${f(cx+sw)} ${f(stemBot)} L${f(cx+sw)} ${f(gapBot)} L${f(cx-sw)} ${f(gapBot)} Z`;
+  return {arrow, bar, bridge};
+}
+
+// ===== 波形 =====
+const WAVE_PAT = { 3:[0.6,1,0.45], 4:[0.55,1,0.72,0.4], 5:[0.5,0.8,1,0.62,0.38], 6:[0.45,0.75,1,0.7,0.55,0.35] };
+function waveBars(w){
+  const n=Math.round(w.n), pat=WAVE_PAT[n]||WAVE_PAT[4], x0=w.cx-w.span/2, step=n>1?w.span/(n-1):0;
+  let out='';
+  for(let i=0;i<n;i++){ const bx=x0+i*step, bh=pat[i]*w.h;
+    out+=`<rect x="${f(bx-w.t/2)}" y="${f(w.cy-bh/2)}" width="${f(w.t)}" height="${f(bh)}" rx="${f(w.t/2)}"/>`; }
+  return out;
+}
+
+// ===== 点投影到气泡圆角矩形边 =====
+function projectRR(px,py,b){
+  const x=b.cx-b.w/2, y=b.cy-b.h/2, w=b.w, h=b.h, r=Math.min(b.r,w/2,h/2);
+  let best=[px,py], bd=1e18; const t=(qx,qy)=>{const d=(qx-px)**2+(qy-py)**2; if(d<bd){bd=d;best=[qx,qy];}};
+  const seg=(ax,ay,bx,by,st)=>{for(let i=0;i<=st;i++){const u=i/st; t(ax+(bx-ax)*u, ay+(by-ay)*u);}};
+  const arc=(cx,cy,a0,a1,st)=>{for(let i=0;i<=st;i++){const a=a0+(a1-a0)*i/st; t(cx+r*Math.cos(a), cy+r*Math.sin(a));}};
+  seg(x+r,y,x+w-r,y,40); seg(x+w,y+r,x+w,y+h-r,40); seg(x+w-r,y+h,x+r,y+h,40); seg(x,y+h-r,x,y+r,40);
+  arc(x+w-r,y+r,-Math.PI/2,0,16); arc(x+w-r,y+h-r,0,Math.PI/2,16);
+  arc(x+r,y+h-r,Math.PI/2,Math.PI,16); arc(x+r,y+r,Math.PI,1.5*Math.PI,16);
+  return {x:best[0], y:best[1]};
+}
+
+function bubbleRect(b){ const x=b.cx-b.w/2,y=b.cy-b.h/2;
+  return `<rect x="${f(x)}" y="${f(y)}" width="${f(b.w)}" height="${f(b.h)}" rx="${f(Math.min(b.r,b.w/2,b.h/2))}"/>`; }
+function tailPath(){ const a=projectRR(S.tail.b1.x,S.tail.b1.y,S.bubble), c=projectRR(S.tail.b2.x,S.tail.b2.y,S.bubble);
+  return `<path d="M${f(a.x)} ${f(a.y)} L${f(c.x)} ${f(c.y)} L${f(S.tail.tip.x)} ${f(S.tail.tip.y)} Z"/>`; }
+function iconRect(){ const i=S.icon; return `<rect x="${i.x}" y="${i.y}" width="${i.w}" height="${i.h}" rx="${i.r}"/>`; }
+
+function inkMask(){
+  const p=capsParts(S.caps);
+  return `<mask id="ink" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+    <rect x="0" y="0" width="100" height="100" fill="#000"/>
+    <g fill="#fff">${bubbleRect(S.bubble)}${tailPath()}</g>
+    <g fill="#000">${waveBars(S.wave)}</g>
+    <g fill="#000" stroke="#000" stroke-width="${f(S.caps.out)}" stroke-linejoin="round" stroke-linecap="round">
+      <path d="${p.arrow}"/><path d="${p.bar}"/><path d="${p.bridge}"/></g>
+    <g fill="#fff"><path d="${p.arrow}"/><path d="${p.bar}"/></g>
+  </mask>`;
+}
+function artwork(transparent){
+  const ink = transparent ? '#ffffff' : '#111111';
+  const bg  = transparent ? '' : `<g fill="#ffffff">${iconRect()}</g>`;
+  return `<defs><clipPath id="iconClip">${iconRect()}</clipPath>${inkMask()}</defs>`
+       + bg + `<rect x="0" y="0" width="100" height="100" fill="${ink}" mask="url(#ink)" clip-path="url(#iconClip)"/>`;
+}
+
+// ===== 各图形的盒/中心/尺寸接口 =====
+const SHAPES = {
+  bubble:{ name:'气泡', c:()=>S.bubble, box:()=>({x:S.bubble.cx-S.bubble.w/2,y:S.bubble.cy-S.bubble.h/2,w:S.bubble.w,h:S.bubble.h}),
+           setW:v=>S.bubble.w=Math.max(10,v), setH:v=>S.bubble.h=Math.max(10,v), move:(x,y)=>{S.bubble.cx=x;S.bubble.cy=y;} },
+  caps:{   name:'Caps', c:()=>S.caps, box:()=>({x:S.caps.cx-S.caps.headW/2,y:S.caps.cy-S.caps.h/2,w:S.caps.headW,h:S.caps.h}),
+           setW:v=>S.caps.headW=Math.max(6,v), setH:v=>S.caps.h=Math.max(12,v), move:(x,y)=>{S.caps.cx=x;S.caps.cy=y;} },
+  wave:{   name:'波形', c:()=>S.wave, box:()=>({x:S.wave.cx-S.wave.span/2,y:S.wave.cy-S.wave.h/2,w:S.wave.span,h:S.wave.h}),
+           setW:v=>S.wave.span=Math.max(2,v), setH:v=>S.wave.h=Math.max(2,v), move:(x,y)=>{S.wave.cx=x;S.wave.cy=y;} },
+};
+
+// ===== 覆盖层:选框 + 仅当前图形控制点 + 透明 hit 区 =====
+const POSLABEL={n:'高度',s:'高度',e:'宽度',w:'宽度',ne:'宽高',nw:'宽高',se:'宽高',sw:'宽高'};
+function boxHandle(x,y,pos,title){
+  return `<rect class="hd" data-h="box:${pos}" data-t="${title}" x="${f(x-1.7)}" y="${f(y-1.7)}" width="3.4" height="3.4"
+          fill="#fff" stroke="#7b8590" stroke-width="0.5"/>`; }
+function diamond(x,y,key,col,title){
+  return `<rect class="hd" data-h="${key}" data-t="${title}" x="${f(x-1.8)}" y="${f(y-1.8)}" width="3.6" height="3.6"
+          fill="${col}" stroke="#1c1f24" stroke-width="0.4" transform="rotate(45 ${f(x)} ${f(y)})"/>`; }
+function dot(x,y,key,col,title){
+  return `<circle class="hd" data-h="${key}" data-t="${title}" cx="${f(x)}" cy="${f(y)}" r="1.9" fill="${col}" stroke="#1c1f24" stroke-width="0.4"/>`; }
+
+function hitAreas(){
+  // 透明点击区(用于选中/移动);caps 在上,便于在重叠处选中
+  let s='';
+  for(const k of ['bubble','wave','caps']){ const b=SHAPES[k].box();
+    s+=`<rect data-sel="${k}" x="${f(b.x)}" y="${f(b.y)}" width="${f(b.w)}" height="${f(b.h)}" fill="transparent" pointer-events="all" style="cursor:move"/>`; }
+  return s;
+}
+function selectionOverlay(){
+  const sh=SHAPES[SEL], b=sh.box();
+  let s=`<rect x="${f(b.x)}" y="${f(b.y)}" width="${f(b.w)}" height="${f(b.h)}" fill="none" stroke="#8a939d" stroke-width="0.5" stroke-dasharray="2 1.5"/>`;
+  s+=`<text x="${f(b.x)}" y="${f(b.y-1.5)}" fill="#8a939d" font-size="3.4" font-family="sans-serif">${sh.name}</text>`;
+  // 8 个盒手柄
+  const H=[['nw',b.x,b.y],['n',b.x+b.w/2,b.y],['ne',b.x+b.w,b.y],['e',b.x+b.w,b.y+b.h/2],
+           ['se',b.x+b.w,b.y+b.h],['s',b.x+b.w/2,b.y+b.h],['sw',b.x,b.y+b.h],['w',b.x,b.y+b.h/2]];
+  for(const [pos,x,y] of H) s+=boxHandle(x,y,pos,POSLABEL[pos]);
+  // 专属手柄
+  if(SEL==='bubble'){
+    const bb=S.bubble, rr=Math.min(bb.r,bb.w/2,bb.h/2);
+    s+=diamond(bb.cx+bb.w/2-rr, bb.cy-bb.h/2, 'bubble:r', '#48c774', '圆角');
+    const a=projectRR(S.tail.b1.x,S.tail.b1.y,bb), d=projectRR(S.tail.b2.x,S.tail.b2.y,bb);
+    s+=dot(a.x,a.y,'tail:b1','#fff','尖角底点')+dot(d.x,d.y,'tail:b2','#fff','尖角底点');
+    s+=dot(S.tail.tip.x,S.tail.tip.y,'tail:tip','#ff9f43','尖角尖端');
+  }
+  if(SEL==='caps'){ const c=S.caps, y0=c.cy-c.h/2, arrowH=c.h*c.arrowFrac, hy=y0+arrowH*c.headFrac;
+    s+=diamond(c.cx+c.stemW/2, y0+arrowH*0.82, 'caps:stem', '#5b9dff', '身体宽');
+    s+=diamond(c.cx-c.stemW/2, hy, 'caps:head', '#19c3b2', '三角/身体高分界'); }
+  return s;
+}
+function overlay(){ if(!document.getElementById('opt-handles').checked) return '';
+  return hitAreas()+selectionOverlay(); }
+
+// ===== 渲染 =====
+function render(){
+  SVG.innerHTML = artwork(document.getElementById('opt-transparent').checked) + overlay();
+  document.querySelectorAll('.seltabs button').forEach(btn=>btn.classList.toggle('on', btn.dataset.sel===SEL));
+  // 同步滑块数值(不重建 DOM,避免打断拖拽)
+  document.querySelectorAll('#controls input[type=range]').forEach(r=>{
+    const v=getP(r.dataset.p); r.value=v;
+    const span=r.parentElement.querySelector('.val');
+    if(span) span.textContent = r.step<1 ? (+v).toFixed(2) : Math.round(v);
+  });
+}
+function selectShape(k){ SEL=k; buildControls(); render(); setStatus('已选中: '+SHAPES[k].name); }
+
+// ===== 面板(按选中图形显示对应滑块) =====
+function buildControls(){
+  const root=document.getElementById('controls');
+  const items=SLIDERS[SEL]||[];
+  root.innerHTML=`<fieldset><legend>${SHAPES[SEL].name} 参数</legend>`+
+    items.map(([path,label,min,max,step])=>{
+      const v=getP(path), disp=step<1?(+v).toFixed(2):Math.round(v);
+      return `<div class="row"><label>${label}</label>
+        <input type="range" data-p="${path}" min="${min}" max="${max}" step="${step}" value="${v}">
+        <span class="val">${disp}</span></div>`;
+    }).join('')+`</fieldset>`;
+}
+document.getElementById('controls').addEventListener('input', e=>{
+  if(e.target.dataset.p){ setP(e.target.dataset.p, parseFloat(e.target.value)); render(); }});
+document.getElementById('controls').addEventListener('change', e=>{ if(e.target.dataset.p) commit(); });
+
+// ===== 选中 tab =====
+function setStatus(t){ document.getElementById('status').textContent=t; }
+document.querySelectorAll('.seltabs button').forEach(btn=>{ btn.onclick=()=>selectShape(btn.dataset.sel); });
+
+// ===== 拖拽 =====
+function toLocal(evt){ const pt=SVG.createSVGPoint(); pt.x=evt.clientX; pt.y=evt.clientY;
+  const l=pt.matrixTransform(SVG.getScreenCTM().inverse()); return {x:l.x,y:l.y}; }
+SVG.addEventListener('mousedown', e=>{
+  const hkey=e.target.getAttribute('data-h');
+  if(hkey){ drag={k:hkey}; e.preventDefault();
+    setStatus('拖动: '+SHAPES[SEL].name+' · '+(e.target.getAttribute('data-t')||'')); return; }
+  const selk=e.target.getAttribute('data-sel');
+  if(selk){ if(selk!==SEL) selectShape(selk);
+    const l=toLocal(e), c=SHAPES[selk].c();
+    drag={k:'move', ox:l.x-c.cx, oy:l.y-c.cy}; setStatus('移动: '+SHAPES[selk].name); e.preventDefault(); }
+});
+window.addEventListener('mousemove', e=>{
+  if(!drag) return; const l=toLocal(e), sh=SHAPES[SEL], c=sh.c();
+  const k=drag.k;
+  if(k==='move'){ sh.move(l.x-drag.ox, l.y-drag.oy); }
+  else if(k.startsWith('box:')){ const pos=k.slice(4);
+    if(/[ew]/.test(pos)) sh.setW(2*Math.abs(l.x-c.cx));
+    if(/[ns]/.test(pos)) sh.setH(2*Math.abs(l.y-c.cy)); }
+  else if(k==='bubble:r'){ const bb=S.bubble; bb.r=clamp(bb.cx+bb.w/2-l.x,0,Math.min(bb.w/2,bb.h/2)); }
+  else if(k==='caps:stem'){ S.caps.stemW=Math.max(2,2*Math.abs(l.x-S.caps.cx)); }
+  else if(k==='caps:head'){ const c=S.caps, y0=c.cy-c.h/2, arrowH=c.h*c.arrowFrac;
+    c.headFrac=clamp((l.y-y0)/arrowH,0.18,0.82); }
+  else if(k==='tail:tip'){ S.tail.tip={x:l.x,y:l.y}; }
+  else if(k==='tail:b1'){ S.tail.b1=projectRR(l.x,l.y,S.bubble); }
+  else if(k==='tail:b2'){ S.tail.b2=projectRR(l.x,l.y,S.bubble); }
+  render();
+});
+window.addEventListener('mouseup', ()=>{ if(drag){ drag=null; commit(); } });
+
+// ===== 导出 =====
+function exportSVGString(){ const t=document.getElementById('opt-transparent').checked;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="${NS}" viewBox="0 0 100 100" width="1024" height="1024">\n${artwork(t)}\n</svg>`; }
+function download(name,blob){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+document.getElementById('btn-svg').onclick=()=>download('capswriter-icon.svg', new Blob([exportSVGString()],{type:'image/svg+xml'}));
+document.getElementById('btn-png').onclick=()=>{ const img=new Image();
+  img.onload=()=>{ const cv=document.createElement('canvas'); cv.width=1024; cv.height=1024;
+    cv.getContext('2d').drawImage(img,0,0,1024,1024); cv.toBlob(b=>download('capswriter-icon.png',b),'image/png'); };
+  img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(exportSVGString()))); };
+document.getElementById('btn-params').onclick=async()=>{ const txt=JSON.stringify(S,null,2);
+  try{ await navigator.clipboard.writeText(txt); alert('参数已复制,可直接粘给我'); }catch{ prompt('复制参数:',txt); } };
+document.getElementById('btn-reset').onclick=()=>{ S=DEF(); render(); commit(); };
+document.getElementById('btn-undo').onclick=undo;
+document.getElementById('btn-redo').onclick=redo;
+document.getElementById('opt-transparent').onchange=render;
+document.getElementById('opt-handles').onchange=render;
+window.addEventListener('keydown', e=>{ const mod=e.metaKey||e.ctrlKey; if(!mod) return; const k=e.key.toLowerCase();
+  if(k==='z'&&!e.shiftKey){ e.preventDefault(); undo(); } else if((k==='z'&&e.shiftKey)||k==='y'){ e.preventDefault(); redo(); } });
+
+buildControls();
+render();
+setStatus('已选中: '+SHAPES[SEL].name);
+</script>
+</body>
+</html>

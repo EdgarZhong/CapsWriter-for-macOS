@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>CapsWriter Icon · 标准组图</title>
+<style>
+  body{margin:0;background:#15171b;color:#e6e9ee;font:13px/1.5 -apple-system,"PingFang SC",Arial,sans-serif;padding:28px;}
+  h2{font-size:14px;margin:26px 0 12px;color:#9aa3ad;font-weight:600;letter-spacing:.5px;}
+  .row{display:flex;align-items:flex-end;gap:22px;flex-wrap:wrap;}
+  .tile{display:flex;flex-direction:column;align-items:center;gap:6px;}
+  .cap{font-size:11px;color:#7b8590;font-variant-numeric:tabular-nums;}
+  .menubar{display:flex;align-items:center;gap:14px;height:26px;padding:0 14px;border-radius:6px;}
+  .menubar.dark{background:#2b2d31;}
+  .menubar.light{background:#e8e8ea;}
+  .swatch{padding:10px;border-radius:14px;}
+  svg{display:block;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<svg id="measure" width="0" height="0" style="position:absolute;visibility:hidden"></svg>
+
+<script>
+"use strict";
+const NS="http://www.w3.org/2000/svg";
+const f=n=>(+n).toFixed(2);
+
+/* ===== 用户最终确认的参数（来自设计器“复制参数”） ===== */
+const S = {
+  icon:   { x:3, y:3, w:94, h:94, r:22 },
+  bubble: { cx:51.39418029785156, cy:36.907179832458496, w:53.07947540283203, h:41.2861270904541, r:17.175128936767578 },
+  caps:   { cx:30.75494956970215, cy:56.73824691772461, headW:43.02128219604492, stemW:19.61780548095703,
+            h:46.92103576660156, out:5.75, headFrac:0.66, arrowFrac:0.69, barFrac:0.21, barRatio:1.2 },
+  wave:   { cx:57.20234680175781, cy:36.417083740234375, n:4, span:27.237380981445312, h:24.16934585571289, t:5 },
+  tail:   { b1:{x:35.79669008909709,y:54.61142299592052}, b2:{x:59.73156967163086,y:57.738983154296875},
+            tip:{x:33.20308303833008,y:73.21546936035156} },
+};
+
+/* ===== 几何复刻（与 icon-designer.html 完全一致） ===== */
+function capsParts(c){
+  const H=c.h, y0=c.cy-H/2, cx=c.cx;
+  const aF=c.arrowFrac, bF=c.barFrac, gF=Math.max(0.02,1-aF-bF);
+  const arrowH=H*aF, headH=arrowH*c.headFrac, stemBot=y0+arrowH;
+  const gapBot=stemBot+H*gF, barBot=gapBot+H*bF;
+  const hw=c.headW/2, sw=c.stemW/2, bw=(c.stemW*c.barRatio)/2, hy=y0+headH;
+  const arrow=`M${f(cx)} ${f(y0)} L${f(cx+hw)} ${f(hy)} L${f(cx+sw)} ${f(hy)} L${f(cx+sw)} ${f(stemBot)} L${f(cx-sw)} ${f(stemBot)} L${f(cx-sw)} ${f(hy)} L${f(cx-hw)} ${f(hy)} Z`;
+  const bar=`M${f(cx-bw)} ${f(gapBot)} L${f(cx+bw)} ${f(gapBot)} L${f(cx+bw)} ${f(barBot)} L${f(cx-bw)} ${f(barBot)} Z`;
+  const bridge=`M${f(cx-sw)} ${f(stemBot)} L${f(cx+sw)} ${f(stemBot)} L${f(cx+sw)} ${f(gapBot)} L${f(cx-sw)} ${f(gapBot)} Z`;
+  return {arrow, bar, bridge};
+}
+const WAVE_PAT={3:[0.6,1,0.45],4:[0.55,1,0.72,0.4],5:[0.5,0.8,1,0.62,0.38],6:[0.45,0.75,1,0.7,0.55,0.35]};
+function waveBars(w){
+  const n=Math.round(w.n), pat=WAVE_PAT[n]||WAVE_PAT[4], x0=w.cx-w.span/2, step=n>1?w.span/(n-1):0;
+  let out='';
+  for(let i=0;i<n;i++){ const bx=x0+i*step, bh=pat[i]*w.h;
+    out+=`<rect x="${f(bx-w.t/2)}" y="${f(w.cy-bh/2)}" width="${f(w.t)}" height="${f(bh)}" rx="${f(w.t/2)}"/>`; }
+  return out;
+}
+function projectRR(px,py,b){
+  const x=b.cx-b.w/2,y=b.cy-b.h/2,w=b.w,h=b.h,r=Math.min(b.r,w/2,h/2);
+  let best=[px,py],bd=1e18; const t=(qx,qy)=>{const d=(qx-px)**2+(qy-py)**2; if(d<bd){bd=d;best=[qx,qy];}};
+  const seg=(ax,ay,bx,by,st)=>{for(let i=0;i<=st;i++){const u=i/st;t(ax+(bx-ax)*u,ay+(by-ay)*u);}};
+  const arc=(cx,cy,a0,a1,st)=>{for(let i=0;i<=st;i++){const a=a0+(a1-a0)*i/st;t(cx+r*Math.cos(a),cy+r*Math.sin(a));}};
+  seg(x+r,y,x+w-r,y,40);seg(x+w,y+r,x+w,y+h-r,40);seg(x+w-r,y+h,x+r,y+h,40);seg(x,y+h-r,x,y+r,40);
+  arc(x+w-r,y+r,-Math.PI/2,0,16);arc(x+w-r,y+h-r,0,Math.PI/2,16);
+  arc(x+r,y+h-r,Math.PI/2,Math.PI,16);arc(x+r,y+r,Math.PI,1.5*Math.PI,16);
+  return {x:best[0],y:best[1]};
+}
+const bubbleRect=b=>`<rect x="${f(b.cx-b.w/2)}" y="${f(b.cy-b.h/2)}" width="${f(b.w)}" height="${f(b.h)}" rx="${f(Math.min(b.r,b.w/2,b.h/2))}"/>`;
+function tailPath(){ const a=projectRR(S.tail.b1.x,S.tail.b1.y,S.bubble),c=projectRR(S.tail.b2.x,S.tail.b2.y,S.bubble);
+  return `<path d="M${f(a.x)} ${f(a.y)} L${f(c.x)} ${f(c.y)} L${f(S.tail.tip.x)} ${f(S.tail.tip.y)} Z"/>`; }
+const iconRect=()=>`<rect x="${S.icon.x}" y="${S.icon.y}" width="${S.icon.w}" height="${S.icon.h}" rx="${S.icon.r}"/>`;
+
+/* ===== 量 mark 精确包围盒（含 Caps 勾边描边） ===== */
+function measureBBox(){
+  const p=capsParts(S.caps), m=document.getElementById('measure');
+  m.innerHTML=`<g id="mm">
+    ${bubbleRect(S.bubble)}${tailPath()}
+    <g stroke="#000" stroke-width="${f(S.caps.out)}" stroke-linejoin="round" stroke-linecap="round">
+      <path d="${p.arrow}"/><path d="${p.bar}"/></g></g>`;
+  const b=document.getElementById('mm').getBBox();
+  return {x:b.x,y:b.y,w:b.width,h:b.height,cx:b.x+b.width/2,cy:b.y+b.height/2};
+}
+
+/* ===== 居中 + 缩放变换（content 占比 fill） ===== */
+const BB=measureBBox();
+const FILL=76;                                   // mark 最大边占 100 画布的比例
+const s=FILL/Math.max(BB.w,BB.h);
+const T=`translate(50 50) scale(${f(s)}) translate(${f(-BB.cx)} ${f(-BB.cy)})`;
+
+/* ===== mask 复刻（变换组内引用→随坐标系一起缩放） ===== */
+let UID=0;
+function inkMask(id){
+  const p=capsParts(S.caps);
+  return `<mask id="${id}" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+    <rect x="0" y="0" width="100" height="100" fill="#000"/>
+    <g fill="#fff">${bubbleRect(S.bubble)}${tailPath()}</g>
+    <g fill="#000">${waveBars(S.wave)}</g>
+    <g fill="#000" stroke="#000" stroke-width="${f(S.caps.out)}" stroke-linejoin="round" stroke-linecap="round">
+      <path d="${p.arrow}"/><path d="${p.bar}"/><path d="${p.bridge}"/></g>
+    <g fill="#fff"><path d="${p.arrow}"/><path d="${p.bar}"/></g>
+  </mask>`;
+}
+/* bgFill: squircle 底（null=透明菜单栏 template）；ink: mark 着色 */
+function tileSVG(px, bgFill, ink){
+  const uid=++UID, cid='c'+uid, mid='m'+uid;
+  const clip=`<clipPath id="${cid}">${iconRect()}</clipPath>`;
+  const bg = bgFill ? `<rect x="0" y="0" width="100" height="100" fill="${bgFill}" clip-path="url(#${cid})"/>` : '';
+  return `<svg width="${px}" height="${px}" viewBox="0 0 100 100" xmlns="${NS}">
+    <defs>${clip}${inkMask(mid)}</defs>
+    <g clip-path="url(#${cid})">${bg}
+      <g transform="${T}"><rect x="0" y="0" width="100" height="100" fill="${ink}" mask="url(#${mid})"/></g>
+    </g></svg>`;
+}
+
+/* ===== 菜单栏 template：mark only / 紧贴裁切 / 无缩放变换 =====
+   viewBox 直接裁到 mark 包围盒 + pad；ink 画黑（系统按栏反色）。 */
+const PAD = 4;                                   // mark 四周留白（100 单位制）
+const VB = { x:BB.x-PAD, y:BB.y-PAD, w:BB.w+2*PAD, h:BB.h+2*PAD };
+const ASPECT = VB.w/VB.h;                        // ≈1.07（略宽）
+function templateSVG(hpx, ink){                  // hpx = 目标“高度”像素，宽按比例
+  const uid=++UID, mid='m'+uid, wpx=Math.round(hpx*ASPECT);
+  return `<svg width="${wpx}" height="${hpx}" viewBox="${f(VB.x)} ${f(VB.y)} ${f(VB.w)} ${f(VB.h)}" xmlns="${NS}">
+    <defs>${inkMask(mid)}</defs>
+    <rect x="${f(VB.x)}" y="${f(VB.y)}" width="${f(VB.w)}" height="${f(VB.h)}" fill="${ink}" mask="url(#${mid})"/>
+  </svg>`;
+}
+window.templateSVG = templateSVG;                // 供导出调用
+
+/* ===== 预览 ===== */
+function tile(html, label){ return `<div class="tile">${html}<div class="cap">${label}</div></div>`; }
+const root=document.getElementById('root');
+let H='';
+
+// 主预览：menubar template 在真实菜单栏尺寸上的清晰度（浅/深栏，系统会反色）
+H+='<h2>menubar template · 实际尺寸（黑=源文件画法，系统按栏自动反色）</h2>';
+H+='<div class="row" style="align-items:center">';
+H+=`<div class="tile"><div class="menubar dark">${templateSVG(18,'#fff')}<span style="color:#ddd">CapsWriter</span><span style="color:#888">100%</span></div><div class="cap">深色栏 @18px</div></div>`;
+H+=`<div class="tile"><div class="menubar light">${templateSVG(18,'#222')}<span style="color:#222">CapsWriter</span><span style="color:#888">100%</span></div><div class="cap">浅色栏 @18px</div></div>`;
+H+='</div>';
+H+='<div class="row" style="align-items:flex-end;margin-top:14px">';
+[16,18,22,36,44].forEach(px=> H+=tile(`<div style="background:#2b2d31;padding:6px;border-radius:6px">${templateSVG(px,'#fff')}</div>`, px+'px'));
+H+='</div>';
+
+// 放大稿：看勾边/波形/桥接细节是否成立
+H+='<h2>放大稿（黑底白 mark / 检查勾边·波形·白缝）</h2><div class="row">';
+H+=tile(`<div style="background:#000;padding:14px;border-radius:14px">${templateSVG(220,'#fff')}</div>`, '220px @深');
+H+=tile(`<div style="background:#fff;padding:14px;border-radius:14px">${templateSVG(220,'#111')}</div>`, '220px @浅');
+H+='</div>';
+
+root.innerHTML=H;
+console.log('BBox', JSON.stringify(BB), 'VB', JSON.stringify(VB), 'aspect', ASPECT.toFixed(4));
+</script>
+</body>
+</html>
