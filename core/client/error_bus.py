@@ -82,6 +82,15 @@ class ErrorBus:
         if changed:
             self._write()
 
+    def snapshot(self) -> dict[str, Any]:
+        """返回当前状态字段的浅拷贝（线程安全），供菜单栏等只读消费方使用。
+
+        直接读 `_state` 会有跨线程竞争，这里在锁内拷贝一份返回，
+        让调用方（如菜单栏状态表头）拿到一致快照。
+        """
+        with self._lock:
+            return dict(self._state)
+
     def heartbeat(self) -> None:
         """刷新 last_heartbeat 时间戳，由外部每 5s 调用一次。"""
         with self._lock:

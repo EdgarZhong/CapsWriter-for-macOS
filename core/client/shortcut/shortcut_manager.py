@@ -302,19 +302,19 @@ class ShortcutManager:
         """
         按平台语义结束一次“按住说话”录音。
 
-        只有在任务已真正进入录音状态时才结束，避免短按路径误触发 finish。
+        这里改为委托给 `task.request_finish()`，由任务内部统一处理三种情况：
+        - 正在录音：正常 finish；
+        - 仍在“启动中”窗口（开流已开始但 is_recording 未置真）：登记待停止，
+          由 launch() 末尾立即收尾，避免松手过快导致麦克风流被打开却永不关闭；
+        - 未在录音：忽略（短按路径不会误触发 finish）。
         """
         task = self.tasks.get(key_name)
         if task is None:
             logger.debug(f"[{key_name}] 未找到快捷键任务，忽略 stop_press_to_talk")
             return
 
-        if not task.is_recording:
-            logger.debug(f"[{key_name}] 当前未在录音，忽略 stop_press_to_talk")
-            return
-
-        logger.info(f"[{key_name}] 语义长按结束，停止按住说话录音")
-        task.finish()
+        logger.info(f"[{key_name}] 语义长按结束，请求停止按住说话录音")
+        task.request_finish()
 
     # ========== 按键恢复管理 ==========
 

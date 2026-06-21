@@ -143,9 +143,202 @@ def _load_menubar_image():
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# 菜单栏下拉菜单
+#
+# 设计：纯 AppKit 原生 NSMenu + NSMenuItem，不使用任何自定义 NSView。
+#   这样菜单天然继承系统菜单材质——在最新 macOS（Tahoe/26）上呈现 Liquid Glass
+#   半透明效果，并自动跟随系统深色/浅色模式；菜单项图标用 SF Symbol 模板图，
+#   同样随外观自动反色。一旦往菜单项塞自定义视图就会破坏这套原生材质，故不这么做。
+#
+# 菜单结构：
+#   ● CapsWriter · 已就绪   （禁用表头，打开时按 ErrorBus 快照刷新文案）
+#   ──────────
+#   复制最近结果            （无结果时置灰）
+#   编辑热词                （open -t hot.txt，系统默认文本编辑器）
+#   ──────────
+#   重启 CapsWriter         （= capswriter restart）
+#   退出 CapsWriter         （= capswriter stop）
+# ---------------------------------------------------------------------------
+_HOTWORDS_FILE = PROJECT_ROOT / 'hot.txt'
+_CAPSWRITER_PY = PROJECT_ROOT / 'capswriter.py'
+_VENV_PYTHON = PROJECT_ROOT / '.venv' / 'bin' / 'python'   # 与 install.sh 包装脚本一致
+
+# 菜单相关模块级强引用（防止 PyObjC 对象被 GC 回收）
+_status_menu = None
+_menu_controller = None
+_menu_header_item = None
+_menu_copy_item = None
+
+
+def _format_status_title() -> str:
+    """根据 ErrorBus 当前快照生成状态表头文案（菜单打开时刷新）。
+
+    用彩色 emoji 圆点表达状态（color glyph，禁用菜单项也能体现色相）。
+    驱动字段为 `ErrorBus.state`——它已把「正常 / 录音 / 引擎断开 / 客户端故障 /
+    启动中」编码好，直接据此着色，可天然避开启动期把「权限尚未确认」误报成红灯：
+        🟢 运行正常   state=ready（引擎已连 + 键盘接管已建）
+        🔵 录音中     state=recording
+        🟡 引擎未连接 state=connecting（server 断开 / 连接中）
+        🔴 客户端故障 state=error（键盘接管/辅助功能未就绪），或 ready 但麦克风权限缺失
+        ⚪️ 启动中     state=starting（初始态）
+    """
+    eb = _error_bus
+    if eb is None:
+        return "⚪️ CapsWriter · 启动中…"
+    try:
+        s = eb.snapshot()
+    except Exception:
+        return "CapsWriter"
+    state = s.get('state')
+    if state == 'error':
+        return "🔴 CapsWriter · 键盘接管/权限未就绪"
+    if state == 'recording':
+        return "🔵 CapsWriter · 录音中"
+    if state == 'ready':
+        if s.get('microphone_ok') is False:
+            return "🔴 CapsWriter · 麦克风权限缺失"
+        return "🟢 CapsWriter · 运行正常"
+    if state == 'connecting':
+        return "🟡 CapsWriter · 识别引擎未连接"
+    return "⚪️ CapsWriter · 启动中…"
+
+
+def _recent_text() -> str | None:
+    """取最近一次输出文本（优先润色后输出，回退原始识别文本）。"""
+    with _client_lock:
+        c = _client
+    if c is None:
+        return None
+    st = getattr(c, 'state', None)
+    if st is None:
+        return None
+    return getattr(st, 'last_output_text', None) or getattr(st, 'last_recognition_text', None)
+
+
+def _sf_symbol_image(name: str):
+    """加载一个 SF Symbol 模板图（macOS 11+）；不可用时返回 None。
+
+    SF Symbol 默认是模板图，会随系统深/浅色与菜单材质自动反色，保持原生观感。
+    """
+    try:
+        from AppKit import NSImage
+        return NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    except Exception:
+        return None
+
+
+class _StatusMenuController(NSObject):
+    """菜单栏下拉菜单的 target + NSMenuDelegate。
+
+    持有各菜单项的动作方法，并在菜单打开前（menuNeedsUpdate:）刷新状态表头
+    与「复制最近结果」的可用态。所有动作均非阻塞。
+    """
+
+    # ---- NSMenuDelegate：菜单即将显示前刷新动态内容 ----
+    def menuNeedsUpdate_(self, menu):
+        if _menu_header_item is not None:
+            _menu_header_item.setTitle_(_format_status_title())
+        if _menu_copy_item is not None:
+            _menu_copy_item.setEnabled_(bool(_recent_text()))
+
+    # ---- 动作：复制最近结果到剪贴板 ----
+    def copyRecentResult_(self, sender):
+        text = _recent_text()
+        if not text:
+            return
+        try:
+            from AppKit import NSPasteboard, NSPasteboardTypeString
+            pb = NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            pb.setString_forType_(text, NSPasteboardTypeString)
+        except Exception as e:
+            print(f"[CapsWriter.app] 复制最近结果失败: {e}", file=sys.stderr)
+
+    # ---- 动作：用系统默认文本编辑器打开 hot.txt ----
+    def editHotwords_(self, sender):
+        import subprocess
+        try:
+            subprocess.Popen(['open', '-t', str(_HOTWORDS_FILE)])
+        except Exception as e:
+            print(f"[CapsWriter.app] 打开热词文件失败: {e}", file=sys.stderr)
+
+    # ---- 动作：重启 CapsWriter（= capswriter restart）----
+    def restartApp_(self, sender):
+        self._run_cli('restart')
+
+    # ---- 动作：退出 CapsWriter（= capswriter stop）----
+    def quitApp_(self, sender):
+        self._run_cli('stop')
+
+    def _run_cli(self, cmd: str) -> None:
+        """detached 派生 `capswriter <cmd>`。
+
+        restart/stop 都会按身份 SIGTERM 杀掉 client（即本进程），因此必须用
+        start_new_session=True 让命令脱离本进程的会话独立存活——否则本进程退出后，
+        restart 来不及把 client 再拉起来。解释器与 install.sh 包装脚本保持一致。
+        """
+        import subprocess
+        py = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
+        try:
+            subprocess.Popen(
+                [py, str(_CAPSWRITER_PY), cmd],
+                cwd=str(PROJECT_ROOT),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            _menubar_dbg(f"spawn capswriter {cmd}")
+        except Exception as e:
+            print(f"[CapsWriter.app] 执行 capswriter {cmd} 失败: {e}", file=sys.stderr)
+
+
+def _build_status_menu():
+    """构建原生 NSMenu 并挂上各项。返回 NSMenu。"""
+    from AppKit import NSMenu, NSMenuItem
+
+    global _menu_controller, _menu_header_item, _menu_copy_item
+
+    menu = NSMenu.alloc().init()
+    # 关闭自动启停：自行管理各项可用态（表头禁用、复制项按有无结果动态置灰）
+    menu.setAutoenablesItems_(False)
+
+    controller = _StatusMenuController.alloc().init()
+
+    def _add(title, action, symbol=None, enabled=True):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
+        if action is not None:
+            item.setTarget_(controller)
+        item.setEnabled_(enabled)
+        if symbol is not None:
+            img = _sf_symbol_image(symbol)
+            if img is not None:
+                item.setImage_(img)
+        menu.addItem_(item)
+        return item
+
+    # 状态表头（禁用，打开菜单时刷新文案）
+    header = _add(_format_status_title(), None, enabled=False)
+
+    menu.addItem_(NSMenuItem.separatorItem())
+    copy_item = _add("复制最近结果", 'copyRecentResult:', symbol='doc.on.clipboard')
+    _add("编辑热词", 'editHotwords:', symbol='square.and.pencil')
+
+    menu.addItem_(NSMenuItem.separatorItem())
+    _add("重启 CapsWriter", 'restartApp:', symbol='arrow.clockwise')
+    _add("退出 CapsWriter", 'quitApp:', symbol='power')
+
+    menu.setDelegate_(controller)
+
+    _menu_controller = controller      # 强引用：target + delegate 不能被回收
+    _menu_header_item = header
+    _menu_copy_item = copy_item
+    return menu
+
+
 def _install_status_item() -> None:
-    """在系统菜单栏创建 CapsWriter 状态项（仅图标）。必须在主线程调用。"""
-    global _status_item
+    """在系统菜单栏创建 CapsWriter 状态项（图标 + 原生下拉菜单）。必须在主线程调用。"""
+    global _status_item, _status_menu
     if _status_item is not None:
         return
     try:
@@ -174,6 +367,15 @@ def _install_status_item() -> None:
                 btn.setTitle_("CW")
             _menubar_dbg("icon load failed -> text fallback 'CW'")
             print(f"[CapsWriter.app] 菜单栏图标加载失败: {_MENUBAR_ICON} / {_MENUBAR_ICON_PNG}", file=sys.stderr)
+
+        # 挂上原生下拉菜单（设置 menu 后，左键点击图标即弹出）
+        try:
+            _status_menu = _build_status_menu()
+            item.setMenu_(_status_menu)
+        except Exception as e:
+            _menubar_dbg(f"menu build EXCEPTION {e!r}")
+            print(f"[CapsWriter.app] 构建菜单失败（仅图标可用）: {e}", file=sys.stderr)
+
         _status_item = item   # 强引用，防止被回收
     except Exception as e:
         _menubar_dbg(f"EXCEPTION {e!r}")
