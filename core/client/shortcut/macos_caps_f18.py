@@ -76,7 +76,7 @@ class MacOSCapsF18Bridge:
         """CGEventTap 真故障（创建失败 / 运行中撤权 / RunLoop 退出）的统一处理。
 
         采用「干净单路径 + 渐进权限引导」UX（见 docs/macos-architecture-decisions.md 第六节）：
-        恢复 remap → 标记不可用 + 通知 → 渐进引导（默认辅助功能，必要时补输入监控）→ 提示重启。
+        恢复 remap → 标记不可用 + 通知 → 渐进引导（仅辅助功能）→ 提示重启。
         不再静默轮询重建（旧的 15s 自动恢复循环已废弃）。
 
         本方法已在独立线程（TapFailedCallback）执行，run_guide 内部的轮询/等待阻塞无碍。
@@ -104,9 +104,9 @@ class MacOSCapsF18Bridge:
                 "permission_lost",
             )
 
-        # 3. 渐进权限引导：默认只处理辅助功能；若系统已登记输入监控条目且当前为关闭，
-        #    则补一段输入监控引导。这样既不误导首次冷启动，也能覆盖“条目已出现但关闭”
-        #    导致新进程建不起 tap 的场景。
+        # 3. 渐进权限引导：当前阶段只自动处理辅助功能。
+        #    输入监控现象保留给用户手动排障，不纳入程序内正式恢复链路，
+        #    否则会把首次安装与恢复流程拖进另一套不稳定的 TCC 状态机里。
         def _notify(msg: str) -> None:
             if eb:
                 # ErrorBus 按 key 做 30s 去重；引导的多条文案集中在 ~50s 内，
