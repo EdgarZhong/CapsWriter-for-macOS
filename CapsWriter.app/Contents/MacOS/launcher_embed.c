@@ -14,16 +14,16 @@
  * 编译（在项目根目录执行 build_launcher.sh）：
  *   clang -std=c11 -Wall -O2 -arch arm64 \
  *     -I<python_include> \
- *     -DPY_BASE_PREFIX=\"<base_prefix>\" \
  *     -DCW_PY_VERSION=\"3.13\" \
  *     launcher_embed.c \
- *     -L<libdir> -lpython3.13 -Wl,-rpath,<libdir> \
+ *     -L.venv/lib -lpython3.13 -Wl,-rpath,@executable_path/../../../.venv/lib \
  *     -o CapsWriter.app/Contents/MacOS/CapsWriter
  */
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include <ctype.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <stdarg.h>
@@ -32,16 +32,17 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifndef PY_BASE_PREFIX
-#error "PY_BASE_PREFIX 必须在编译时通过 -D 传入，例如：/Users/me/.local/share/mise/installs/python/3.13.13"
-#endif
-
 #ifndef CW_PY_VERSION
 #error "CW_PY_VERSION 必须在编译时通过 -D 传入，例如：3.13"
 #endif
 
 static void die(const char *msg) {
     fprintf(stderr, "[CapsWriter] 启动失败: %s\n", msg);
+    exit(1);
+}
+
+static void die_path(const char *msg, const char *path) {
+    fprintf(stderr, "[CapsWriter] 启动失败: %s: %s\n", msg, path);
     exit(1);
 }
 
@@ -54,6 +55,105 @@ static void fmt_path(char *out, size_t out_size, const char *fmt, ...) {
     if (n < 0 || (size_t)n >= out_size) {
         die("路径拼接缓冲区溢出");
     }
+}
+
+/* 原地去除首尾空白，解析 pyvenv.cfg 这类小配置文件时使用。 */
+static char *trim_space(char *s) {
+    while (*s && isspace((unsigned char)*s)) {
+        s++;
+    }
+    char *end = s + strlen(s);
+    while (end > s && isspace((unsigned char)*(end - 1))) {
+        *(--end) = '\0';
+    }
+    return s;
+}
+
+static int has_suffix(const char *s, const char *suffix) {
+    size_t s_len = strlen(s);
+    size_t suffix_len = strlen(suffix);
+    return s_len >= suffix_len && strcmp(s + s_len - suffix_len, suffix) == 0;
+}
+
+static void strip_last_component(char *path) {
+    char *slash = strrchr(path, '/');
+    if (slash == NULL || slash == path) {
+        die_path("路径层级不足，无法取父目录", path);
+    }
+    *slash = '\0';
+}
+
+/*
+ * 读取 Python base prefix。
+ *
+ * 这里刻意不使用编译期 -DPY_BASE_PREFIX，也不把构建机的 /Users/xxx 写进 Mach-O。
+ * build_launcher.sh 会把当前 .venv 对应的 sys.base_prefix 写入
+ * .venv/capswriter-python-prefix；若该文件不存在，则退回解析 pyvenv.cfg 的 home 字段。
+ * 这样 clone 到不同用户名、不同 Python 管理器（mise/Homebrew/uv-managed Python）时，
+ * 只要在目标机器执行安装或重建，启动器就会读取目标机器自己的环境。
+ */
+static void resolve_python_base_prefix(const char *project_root,
+                                       char *base_prefix,
+                                       size_t base_prefix_size) {
+    char prefix_file[PATH_MAX];
+    fmt_path(prefix_file, sizeof(prefix_file),
+             "%s/.venv/capswriter-python-prefix", project_root);
+
+    FILE *fp = fopen(prefix_file, "r");
+    if (fp != NULL) {
+        char line[PATH_MAX];
+        if (fgets(line, sizeof(line), fp) == NULL) {
+            fclose(fp);
+            die_path("Python prefix 文件为空", prefix_file);
+        }
+        fclose(fp);
+
+        char *value = trim_space(line);
+        if (*value == '\0') {
+            die_path("Python prefix 文件为空", prefix_file);
+        }
+        strlcpy(base_prefix, value, base_prefix_size);
+        return;
+    }
+
+    char cfg_path[PATH_MAX];
+    fmt_path(cfg_path, sizeof(cfg_path), "%s/.venv/pyvenv.cfg", project_root);
+    fp = fopen(cfg_path, "r");
+    if (fp == NULL) {
+        die_path("未找到 .venv/capswriter-python-prefix 或 .venv/pyvenv.cfg，请重新执行 bash install.sh", cfg_path);
+    }
+
+    char home_value[PATH_MAX] = {0};
+    char line[PATH_MAX + 64];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *eq = strchr(line, '=');
+        if (eq == NULL) {
+            continue;
+        }
+        *eq = '\0';
+        char *key = trim_space(line);
+        char *value = trim_space(eq + 1);
+        if (strcmp(key, "home") == 0 && *value != '\0') {
+            strlcpy(home_value, value, sizeof(home_value));
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (home_value[0] == '\0') {
+        die_path("pyvenv.cfg 缺少 home 字段，请重新执行 bash install.sh", cfg_path);
+    }
+
+    char resolved_home[PATH_MAX];
+    if (realpath(home_value, resolved_home) == NULL) {
+        strlcpy(resolved_home, home_value, sizeof(resolved_home));
+    }
+
+    if (has_suffix(resolved_home, "/bin")) {
+        strip_last_component(resolved_home);
+    }
+
+    strlcpy(base_prefix, resolved_home, base_prefix_size);
 }
 
 /* 向 PyConfig.module_search_paths 追加一条路径 */
@@ -96,19 +196,28 @@ int main(int argc, char **argv) {
     char venv_site[PATH_MAX];    /* .venv site-packages */
     char base_stdlib[PATH_MAX];  /* Python stdlib */
     char base_dynload[PATH_MAX]; /* Python lib-dynload */
+    char base_prefix[PATH_MAX];  /* 目标机器的 Python base prefix */
+
+    resolve_python_base_prefix(project_root, base_prefix, sizeof(base_prefix));
 
     fmt_path(entry_path,  sizeof(entry_path),
              "%s/start_client_macos.py", project_root);
     fmt_path(venv_site,   sizeof(venv_site),
              "%s/.venv/lib/python" CW_PY_VERSION "/site-packages", project_root);
     fmt_path(base_stdlib, sizeof(base_stdlib),
-             "%s/lib/python" CW_PY_VERSION, PY_BASE_PREFIX);
+             "%s/lib/python" CW_PY_VERSION, base_prefix);
     fmt_path(base_dynload, sizeof(base_dynload),
-             "%s/lib/python" CW_PY_VERSION "/lib-dynload", PY_BASE_PREFIX);
+             "%s/lib/python" CW_PY_VERSION "/lib-dynload", base_prefix);
 
     if (access(entry_path, R_OK) != 0) {
         fprintf(stderr, "[CapsWriter] 未找到入口脚本: %s\n", entry_path);
         return 1;
+    }
+    if (access(base_stdlib, R_OK) != 0) {
+        die_path("Python 标准库路径不可读，请重新执行 bash install.sh", base_stdlib);
+    }
+    if (access(base_dynload, R_OK) != 0) {
+        die_path("Python lib-dynload 路径不可读，请重新执行 bash install.sh", base_dynload);
     }
 
     /* ── 4. 构造 Python 侧 argv：[exe_path, entry_path, original_args...] ── */
@@ -141,12 +250,12 @@ int main(int argc, char **argv) {
     CHECK(PyConfig_SetBytesString(&config, &config.program_name, exe_path));
     CHECK(PyConfig_SetBytesString(&config, &config.executable,   exe_path));
 
-    /* 以 mise 安装的原始 Python 为 base prefix，venv 仅贡献 site-packages */
-    CHECK(PyConfig_SetBytesString(&config, &config.home,            PY_BASE_PREFIX));
-    CHECK(PyConfig_SetBytesString(&config, &config.prefix,          PY_BASE_PREFIX));
-    CHECK(PyConfig_SetBytesString(&config, &config.exec_prefix,     PY_BASE_PREFIX));
-    CHECK(PyConfig_SetBytesString(&config, &config.base_prefix,     PY_BASE_PREFIX));
-    CHECK(PyConfig_SetBytesString(&config, &config.base_exec_prefix,PY_BASE_PREFIX));
+    /* 以目标机器的原始 Python 为 base prefix，venv 只贡献项目依赖。 */
+    CHECK(PyConfig_SetBytesString(&config, &config.home,             base_prefix));
+    CHECK(PyConfig_SetBytesString(&config, &config.prefix,           base_prefix));
+    CHECK(PyConfig_SetBytesString(&config, &config.exec_prefix,      base_prefix));
+    CHECK(PyConfig_SetBytesString(&config, &config.base_prefix,      base_prefix));
+    CHECK(PyConfig_SetBytesString(&config, &config.base_exec_prefix, base_prefix));
 
     /* 手动控制 sys.path，顺序：项目根 → stdlib → lib-dynload → venv site-packages */
     config.module_search_paths_set = 1;

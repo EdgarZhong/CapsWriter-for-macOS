@@ -191,6 +191,84 @@ def _server_port_reachable() -> bool:
         return False
 
 
+def _launcher_hardcoded_user_paths() -> list[str]:
+    """扫描 .app 启动器是否残留 /Users/... 这类构建机绝对路径。
+
+    macOS 嵌入式 Python 版本的关键风险在 Mach-O 里：
+    - LC_RPATH 若写成 `/Users/某个开发者/.../lib`，换用户名后 dyld 会在 main() 前失败；
+    - C 字符串若写死 `sys.base_prefix`，即使动态库找到，标准库也会指向构建机。
+    这里同时看 `otool -l` 和 `strings`，让 doctor 能直接指出旧 launcher 需要重建。
+    """
+    if not APP_EXECUTABLE.exists():
+        return []
+
+    hits: set[str] = set()
+    for cmd in (['otool', '-l', str(APP_EXECUTABLE)], ['strings', str(APP_EXECUTABLE)]):
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        for line in result.stdout.splitlines():
+            text = line.strip()
+            # `otool -L <file>` 第一行会回显“被检查文件自身路径:”，项目放在
+            # /Users/... 下时这是正常现象，不代表 Mach-O 内部写死了用户路径。
+            if text.startswith(str(APP_EXECUTABLE)):
+                continue
+            if '/Users/' in text:
+                hits.add(text)
+    return sorted(hits)
+
+
+def _launcher_uses_relative_python_rpath() -> bool:
+    """确认 libpython 通过项目内 .venv/lib 的相对 rpath 加载。"""
+    if not APP_EXECUTABLE.exists():
+        return False
+    result = subprocess.run(
+        ['otool', '-l', str(APP_EXECUTABLE)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return '@executable_path/../../../../.venv/lib' in result.stdout
+
+
+def _launcher_rebuild_reason() -> str | None:
+    """返回需要重建 launcher 的原因；无需重建时返回 None。"""
+    if not APP_EXECUTABLE.exists():
+        return "未找到 CapsWriter.app 可执行文件"
+    hardcoded = _launcher_hardcoded_user_paths()
+    if hardcoded:
+        return "启动器包含构建机绝对路径: " + hardcoded[0]
+    if not _launcher_uses_relative_python_rpath():
+        return "启动器尚未使用 .venv/lib 相对 rpath"
+    if not (PROJECT_ROOT / '.venv' / 'capswriter-python-prefix').exists():
+        return "缺少 .venv/capswriter-python-prefix 运行时 prefix 文件"
+    return None
+
+
+def _ensure_launcher_current() -> bool:
+    """在注册 launchd 前确保 .app 启动器属于当前机器环境。
+
+    用户从 GitHub clone 下来的仓库可能带有别人机器上构建过的 Mach-O。
+    如果不在本机重建，dyld 会尝试加载旧用户名下的 libpython 并直接闪退。
+    因此 install 阶段主动检测并重建，避免让用户手动填写或修改任何 Python 路径。
+    """
+    reason = _launcher_rebuild_reason()
+    if reason is None:
+        return True
+
+    if not VENV_PYTHON.exists():
+        print("CapsWriter.app 启动器需要重建，但未找到 .venv/bin/python。")
+        print("请先执行 bash install.sh 创建虚拟环境并安装依赖。")
+        return False
+
+    print(f"检测到 CapsWriter.app 启动器需要重建：{reason}")
+    print("正在使用当前 .venv 自动重建启动器...")
+    result = subprocess.run(
+        ['bash', str(PROJECT_ROOT / 'build_launcher.sh')],
+        cwd=str(PROJECT_ROOT),
+        check=False,
+    )
+    return result.returncode == 0
+
+
 # ---------------------------------------------------------------------------
 # launchd plist 生成
 # ---------------------------------------------------------------------------
@@ -304,6 +382,9 @@ def _build_server_plist() -> str:
 def cmd_install(args) -> int:
     """注册 server + client 两个 launchd 服务（各自独立，互不依赖）。"""
     LAUNCHD_PLIST_CLIENT.parent.mkdir(parents=True, exist_ok=True)
+
+    if not _ensure_launcher_current():
+        return 1
 
     # server plist
     if not _plist_exists(LAUNCHD_PLIST_SERVER):
@@ -571,9 +652,16 @@ def cmd_doctor(args) -> int:
     else:
         issues.append("未找到 .venv/bin/python，请先创建 venv 并安装依赖")
 
-    # 2. CapsWriter.app 可执行文件
+    # 2. CapsWriter.app 可执行文件与 Python 动态库链接方式
     if APP_EXECUTABLE.exists():
-        ok.append(f"CapsWriter.app: {APP_EXECUTABLE}")
+        reason = _launcher_rebuild_reason()
+        if reason is None:
+            ok.append(f"CapsWriter.app: {APP_EXECUTABLE}（launcher 已使用当前 .venv 相对 rpath）")
+        else:
+            issues.append(
+                f"CapsWriter.app launcher 需要重建：{reason}\n"
+                "  → 执行 bash install.sh 或 bash build_launcher.sh"
+            )
     else:
         issues.append(f"未找到 app 可执行文件: {APP_EXECUTABLE}\n"
                       "  → 请执行 bash build_launcher.sh 编译 C 启动器")

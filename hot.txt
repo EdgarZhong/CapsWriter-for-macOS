@@ -13,7 +13,7 @@ SenseVoice-small
 Fun-ASR-Nano | 放 ASR Nano
 Qwen3-ASR | 千问ASR | 千问3ASR
 Qwen3-TTS | 千问TTS | 千问3TTS
-Claude | 克劳德 | 克劳得
+Claude | 克劳德 | 克劳得 | cloud
 CLAUDE.md | cloud.md | cloud 点 MD
 Claude Code | cloud cold | cloud code
 config_client.py | config_client 点 py | config_client

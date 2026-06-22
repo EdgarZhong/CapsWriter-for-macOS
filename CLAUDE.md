@@ -80,6 +80,7 @@ launchd
 | **通知横幅图标** | 🔲 park | 破图，下个会话受控实验（`docs/bug-report-notification-icon.md`） |
 | **D：孤儿进程（client 脱离 launchd）** | ✅ 代码+实测 | 根因：client 作为 NSApplication GUI app 被 LaunchServices 从 `com.capswriter.client` 标签**领养**到 `application.com.capswriter.client.<ASN>` 动态标签，`_launchctl_pid(原标签)`/`launchctl stop 原标签` 够不到 → stop 误判"未在运行" → 孤儿存活、start 再起一个 → 双实例。修法：`capswriter.py` 新增 `_client_pids()`（`pgrep -f` 按 .app 可执行文件路径查，**label-independent**）+ `_stop_client()`（launchctl stop 协调 KeepAlive + 按身份 SIGTERM 兜底 + 10s 后 SIGKILL）；stop/start/uninstall/status 全改走它。`restart` 实测：停旧 client→起单实例，无双图标 |
 | **E：Caps 长按松手后麦克风卡住** | ✅ 代码+单测，待运行时复验 | 2026-06-22 修复。根因=`task.launch()` 开流（`start_recording_session()` 数百毫秒）期间 `is_recording` 仍为 False，松手 stop 被 `stop_press_to_talk` 丢弃→麦克风永不关闭。修法：`ShortcutTask` 引入 `_lifecycle_lock`+`_launching`+`_stop_pending`，补齐“录音启动中/待停止”语义：launch **锁外**开流（让 stop 能无阻塞登记 pending）、开流后进锁置 `is_recording=True` 并取出 pending，若启动期间已松手则末尾立即 `finish()`；新增线程安全入口 `request_finish()`（启动中登记 pending，否则按 is_recording 决定）；`finish()/cancel()` 改为锁内 check-and-set **幂等**；`stop_press_to_talk` 委托 `request_finish`。开流/关流被串行到同一线程，且“只要开流已开始，松手后必有可达关闭路径”。3 场景隔离单测通过（启动中松手/正常长按/重复 finish 幂等）。<br>—— 原记录：2026-06-19 13:09 复现。最终状态已收敛：**系统级麦克风指示持续亮起，说明麦克风被打开但没有被正确关闭；同时 `Caps` 接管、client 心跳、短按切换均正常。** 关键日志链路：`13:09:55.872` 长按成立并开始 `start_recording_session()`/`stream open requested`/`找到音频设备`；`13:09:56.301` 松手后进入 `stop_press_to_talk()`，但因 `task.is_recording` 尚未置真，被判定为“当前未在录音，忽略 stop_press_to_talk”。由此可知：① 音频流打开动作已经启动，所以系统看到麦克风在录；② 关闭流路径未执行，所以麦克风不会自动收掉；③ 本次并未进入稳定的 `recording=True -> begin/data/finish -> server 识别` 正常链路，server 侧也没有对应新任务，因此这次更接近“识别未真正触发”，而不是“识别后收尾失败”。根因归类：**start/stop 状态机竞态**，不是权限、event tap 或 server 断连问题。 |
+| **F：launcher 硬编码 Python 路径** | ✅ 代码+构建验证 | 2026-06-22 修复用户反馈：旧 `CapsWriter.app/Contents/MacOS/CapsWriter` 由开发机编译，Mach-O 含 `LC_RPATH=/Users/edgar/.local/share/mise/.../lib` 且 C 字符串含 `PY_BASE_PREFIX=/Users/edgar/...`，换用户名后 dyld 在 main() 前找不到 `libpython3.13.dylib` 直接闪退。修法：`launcher_embed.c` 运行时读取 `.venv/capswriter-python-prefix`（缺失时退回 `pyvenv.cfg`）定位目标机器 Python base prefix；`build_launcher.sh` 在 `.venv/lib` 创建 `libpython3.13.dylib` 符号链接，并用 `@executable_path/../../../../.venv/lib` 相对 rpath 链接，移除编译期 `PY_BASE_PREFIX`；`install.sh` 负责自动创建/更新 `.venv`、安装依赖、重建 launcher、安装命令；`capswriter install/doctor` 增加旧 launcher 检测与自动重建提示。验证：`bash -n install.sh build_launcher.sh`、`python -m py_compile capswriter.py`、`bash build_launcher.sh`、`otool -L/-l` 显示 `@rpath/libpython3.13.dylib` + 相对 rpath，`strings CapsWriter... | rg '/Users/'` 无命中，`_launcher_rebuild_reason()` 返回 None。 |
 | **P3：后端推理精度调优** | 🟡 进行中 | 聚焦 `qwen_asr_mlx`：核对 8bit/4bit 模型选择、上下文/热词能力缺口、音频前处理与解码参数差异，评估是否需要补齐能力或回退默认规格 |
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |
@@ -89,10 +90,10 @@ launchd
 
 ## 重签名注意事项（开发期）
 
-每次运行 `build_launcher.sh` 后 Accessibility TCC 记录失效（csreq 变化）：
-- 脚本结尾自动打开辅助功能设置
-- 在列表中找到 CapsWriter → 点「-」删除 → 重启软件 → 重新授权
-- 麦克风权限一般无需重置，除非录音全零才执行 `tccutil reset Microphone com.capswriter.client`
+每次运行 `build_launcher.sh` 后可能因签名变化导致 Accessibility TCC 记录需要重新确认：
+- 脚本不再自动 `tccutil reset`，也不主动打开系统设置，避免构建阶段修改用户权限状态。
+- 启动时由现有权限引导流程处理辅助功能授权；必要时在列表中找到 CapsWriter → 关闭再打开，或删除后重启软件重新授权。
+- 麦克风权限一般无需重置，除非录音全零才由用户手动执行 `tccutil reset Microphone com.capswriter.client`。
 
 ---
 
@@ -100,6 +101,7 @@ launchd
 
 | 优先级 | 任务 |
 |--------|------|
+| **P0（最优先）** | **重新考虑权限引导：输入监控（Input Monitoring）必须重新纳入引导链路。** 实测（2026-06-22）证明：仅更新辅助功能、不更新输入监控时，`CGEventTapCreate` 仍失败 → 触发 fatal → launchd 每 ~13s 重启 client 死循环，键盘接管永远无法建立（详见“最近故障记录”）。此前“权限引导收敛为仅辅助功能、输入监控仅作人工提示”的决策被推翻：CGEventTap 实际受输入监控门控。需要重做引导：①把输入监控重新纳入正式引导/门控；②fatal→退出→KeepAlive 重启不能形成死循环（退出前必须确认权限确已就绪，或改为不退出原地等待，避免 launchd 疯狂拉起）；③稳定 ad-hoc 重签后 TCC 失效与输入监控/辅助功能两条权限的口径要一起想清楚 |
 | P0 | 用同一批音频样本对比 `qwen_asr_mlx` 与 Windows `qwen_asr` 路线，区分“量化差异”与“接入差异” |
 | P0 | fork `mlx-qwen3-asr`，摆脱 `Session.transcribe()` 黑盒接法，优先夺回 prompt 组装、language/context 策略、generation config 的控制权 |
 | P0 | 复核并补齐 `qwen_asr_mlx` 当前缺失能力：服务端热词、解码参数、chunking 策略、aligner 接法 |
@@ -136,3 +138,24 @@ launchd
 - 后续修复方向：
   - 需要补齐“录音启动中 / 待停止”语义，或者把状态置位时机前移
   - 目标不是只修日志口径，而是保证：**只要麦克风打开动作已经开始，松手后就一定存在可达的关闭路径**
+
+### 2026-06-22：输入监控未更新导致键盘接管 fatal 死循环
+
+- 复现时间：2026-06-22 12:35 前后。
+- 触发背景：先修复了 launcher rpath off-by-one（见任务 F 更新），client 已能正常启动；随后用户**仅在系统设置里更新了“辅助功能”，未更新“输入监控”**，重启 client。
+- 用户侧最终现象：先提示“键盘接管未生效”，再提示“权限已配置，待重启”，重启后**依然不断循环**，键盘接管始终无法真正建立。
+- 关键日志序列（每 ~13s 换一个新 PID：46652 → 46739 → 46817，循环往复）：
+  - `[caps-remap] enabling CapsLock -> F18`（已写入 remap，Caps→F18 映射生效）
+  - `[f18-listener] CGEventTap 创建失败，请确认已授权辅助功能（Accessibility）权限。`
+  - `[caps-f18-bridge] CGEventTap 真故障，恢复键盘并引导用户重授权`
+  - `[caps-remap] restoring original UserKeyMapping=[]`（恢复键盘）
+  - 进程退出 → launchd `KeepAlive(SuccessfulExit=false)` 重新拉起 → 回到第一步
+- 根因判断（用户确认）：
+  - **CGEventTap 实际受“输入监控（Input Monitoring）”门控，而非仅“辅助功能”。** 本次只更新了辅助功能、输入监控未更新，所以 tap 创建持续失败。
+  - 代码层把 tap 创建失败一律归为 fatal，fatal 路径会让**进程退出**，再被 launchd `KeepAlive` 拉起 → 形成 ~13s 一轮的死循环；用户无法跳出。
+  - 日志文案只提“请确认已授权辅助功能”，**误导**用户只去开辅助功能，掩盖了真正缺失的输入监控。
+- 与既有决策的冲突：
+  - 此前（CLAUDE.md「权限恢复 UX / 决策表」与任务 M7.2/M7.3）已把输入监控**移出**自动引导链路，只在 CLI/通知里作人工提示。本次实测推翻该决策——输入监控是 CGEventTap 的硬门控，必须重新纳入引导。
+- 已采取的临时动作：`capswriter stop` 止住循环（已确认无 client 进程）。
+- 下一步（见「下一步工作」P0 最优先项）：重做权限引导，重新纳入输入监控门控；并消除 fatal→退出→KeepAlive 重启的死循环（退出前确认权限就绪，或改原地等待不退出）。
+- 旁证（另一相关风险，非本次根因）：`build_launcher.sh` 重建会以 **ad-hoc 签名**重签（`Signature=adhoc`，cdhash 随构建变化），辅助功能 / 输入监控的 TCC 授权按 cdhash 绑定，**每次重建都会失效**。重做权限引导时需一并考虑“重签后授权失效”的口径（评估稳定自签名证书以让授权跨重建存活）。

@@ -29,16 +29,22 @@ cd CapsWriter-Offline
 git checkout mac-dev
 ```
 
-### 第二步：安装依赖
+### 第二步：本地安装
 
-需要先安装 `uv`（若未安装：`brew install uv`）。
+需要先安装 `uv`（若未安装：`brew install uv`）。随后执行：
 
 ```bash
-uv python pin 3.13
-uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python -r requirements-server.txt
-uv pip install --python .venv/bin/python -r requirements-client.txt
+bash install.sh
 ```
+
+`install.sh` 会自动完成以下事项：
+
+- 创建 / 检查 `.venv`（Python 3.13）
+- 安装 / 更新 client 与 server 依赖
+- 在当前机器重建 `CapsWriter.app` 启动器
+- 安装全局 `capswriter` 命令到 `~/.local/bin`
+
+> macOS 版启动器会嵌入 CPython，但不会把开发者机器的 `/Users/...` 路径写死到二进制里。安装脚本会在你的机器上重新链接 `.venv` 对应的 `libpython`，避免换用户名后 dyld 找不到 Python 动态库。
 
 ### 第三步：下载模型
 
@@ -50,37 +56,35 @@ uv pip install --python .venv/bin/python -r requirements-client.txt
 | 1.7B-4bit（轻量） | `mlx-community/Qwen3-ASR-1.7B-4bit` | ~1.0 GB | 低内存 / 重度离电 |
 
 ```bash
-pip install huggingface_hub
+uv pip install --python .venv/bin/python huggingface_hub
 
 # 下载默认规格（8bit，约 1.8 GB）
-huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+.venv/bin/huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
   --local-dir models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit
 ```
 
 > 国内访问 Hugging Face 可在命令前加 `HF_ENDPOINT=https://hf-mirror.com`。
 
-### 第四步：注册全局命令
+### 第四步：注册并启动后台服务
 
 ```bash
-bash install.sh
+capswriter install
+capswriter start
 ```
 
-完成后 `capswriter` 命令全局可用。若提示 `~/.local/bin` 不在 PATH，按提示将以下内容加入 `~/.zshrc` 后重开终端：
+`capswriter install` 会注册 client / server 两个 launchd 服务，后续登录后自动启动。
+若 `install.sh` 提示 `~/.local/bin` 不在 PATH，按提示将以下内容加入 `~/.zshrc` 后重开终端：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### 第五步：授权（首次启动前）
+### 第五步：授权（首次启动时）
 
 CapsWriter 需要两项系统权限：（均位于“隐私与安全性”设置）
 
 **辅助功能权限**（用于自动粘贴）
 **输入监控权限**（用于caps lock动作拦截）
-
-```bash
-capswriter start
-```
 
 启动时若 CapsWriter 检测到权限缺失，会弹出引导对话框并自动打开系统设置，按提示操作即可。
 若对应权限已打开但软件未按预期工作，请在相应设置列表中点击'-'将CapsWriter删除，然后重启软件重新授权。
@@ -102,7 +106,7 @@ capswriter restart   # 重启（修改配置后使用）
 capswriter status    # 查看当前运行状态
 ```
 
-### 开机自启（可选）
+### 开机自启
 
 ```bash
 capswriter install   # 注册 launchd，登录后自动启动，无需手动 start
@@ -122,7 +126,7 @@ capswriter uninstall # 取消自启
 
 客户端运行时，菜单栏会常驻一个 CapsWriter 图标（矢量绘制，自动适配深 / 浅色菜单栏）。按住 **⌘ 拖动**可把它移到喜欢的位置，系统会记住，重启后保持不变；退出客户端时图标自动消失。
 
-> 当前仅显示图标，点击暂无菜单；下拉菜单与状态显示在后续版本加入。
+点击菜单栏图标可查看当前状态，并执行复制最近结果、编辑热词、重启 CapsWriter、退出 CapsWriter 等操作。
 
 ---
 
@@ -171,13 +175,13 @@ capswriter restart
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |
-| 发布形态 | .exe 安装包 | .app bundle（当前 clone + install.sh,暂不支持的dmg分发） |
+| 发布形态 | .exe 安装包 | .app bundle（当前 clone + install.sh，暂不支持 dmg 分发） |
 | GUI | 系统托盘 | 菜单栏图标（矢量 template，深浅色自适应） |
 
 ## 后续计划
 
 - [x] 菜单栏图标（矢量 template，深浅色自适应）
-- [ ] 菜单栏状态显示与下拉菜单
+- [x] 菜单栏状态显示与下拉菜单
 - [ ] 简洁精美的GUI
 - [ ] ASR推理精度调优
 - [ ] .dmg 一键安装包
