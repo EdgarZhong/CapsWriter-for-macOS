@@ -350,9 +350,27 @@ class MacOSCapsRemapSession:
                 pass
 
     def restore(self) -> None:
-        """恢复到启动前的原始映射，并在状态文件中标记为非活跃。"""
+        """恢复到启动前的原始映射，并在状态文件中标记为非活跃。
+
+        双实例保护：remap 是系统全局状态，只有当前持有者才能 restore。
+        若另一个实例已接管（state 文件 client_pid != 自己），跳过 restore，
+        避免清掉新实例的 remap 导致键盘接管断掉。
+        """
         if not self.enabled:
             return
+
+        # 双实例保护：检查 remap 归属
+        try:
+            state = _load_state()
+            if state is not None and state.get("client_pid") != self._client_pid:
+                logger.warning(
+                    "[caps-remap] 跳过 restore：remap 已被 pid=%s 接管（自身 pid=%s）",
+                    state.get("client_pid"), self._client_pid,
+                )
+                self.enabled = False
+                return
+        except Exception:
+            pass  # state 读取失败时保守 restore
 
         logger.info("[caps-remap] restoring original UserKeyMapping=%s", self.original_mapping)
         set_user_key_mapping(self.original_mapping)

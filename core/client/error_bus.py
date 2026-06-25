@@ -51,6 +51,9 @@ class ErrorBus:
             "server_connected": False,
             "accessibility_ok": False,
             "microphone_ok":    False,
+            # 权限引导全局时效状态（PermPhase.value：probing/guide_ax/guide_im/
+            # ready/revoked），None 表示尚未进入引导流程
+            "perm_phase":       None,
             "started_at":       datetime.now().isoformat(timespec='seconds'),
             "last_heartbeat":   None,
             "last_error":       None,

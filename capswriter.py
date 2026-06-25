@@ -226,7 +226,11 @@ def _launcher_uses_relative_python_rpath() -> bool:
         text=True,
         check=False,
     )
-    return '@executable_path/../../../../.venv/lib' in result.stdout
+    # build_launcher.sh 用 @executable_path/../../../.venv/lib（3 级，从
+    # CapsWriter.app/Contents/MacOS/ 回退到项目根）。此处检测串必须与之严格一致，
+    # 否则会永远判定「未用相对 rpath」→ 每次 install 都误判需重建+ad-hoc 重签 →
+    # cdhash 变化 → 辅助功能/输入监控 TCC 授权失效。
+    return '@executable_path/../../../.venv/lib' in result.stdout
 
 
 def _launcher_rebuild_reason() -> str | None:
@@ -306,12 +310,15 @@ def _build_client_plist() -> str:
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 崩溃（非零退出）时 launchd 重启；正常停止（exit 0）不重启 -->
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <!--
+      故意不设 KeepAlive：client 是 GUI app，其生命周期由用户 / CLI / 菜单栏自管。
+      macOS 在授予输入监控/辅助功能权限时会强杀 client（权限在进程启动时读取），
+      若设了 KeepAlive(SuccessfulExit=false)，这一强杀会被 launchd 当成崩溃而复活
+      → 复活的孤儿（且常被 LaunchServices 领养到动态标签）与显式 start / 手动重启
+      相撞 = 双实例。同一 KeepAlive 也是历史「13s fatal 死循环」的根。
+      授权后需要重启时由用户/CLI 显式 start；server plist 仍保留 KeepAlive 做崩溃恢复
+      （server 非 GUI、不被权限强杀，正常停止 exit 0 也不会与 KeepAlive 相争）。
+    -->
 
     <key>StandardOutPath</key>
     <string>{stdout_log}</string>
@@ -722,6 +729,29 @@ def cmd_doctor(args) -> int:
 # help 子命令
 # ---------------------------------------------------------------------------
 
+def cmd_reset_permissions(args) -> int:
+    """重置辅助功能和输入监控权限（清除 TCC 条目），用于更新/rebuild 后权限失效的恢复。"""
+    # 先停掉正在运行的 client，避免 remap 残留
+    _stop_client()
+
+    print("正在重置权限 ...")
+    for service, label in [
+        ("Accessibility", "辅助功能"),
+        ("ListenEvent", "输入监控"),
+    ]:
+        r = subprocess.run(
+            ['tccutil', 'reset', service, LAUNCHD_LABEL_CLIENT],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            print(f"  ✓ {label}（{service}）已重置")
+        else:
+            print(f"  ✗ {label}（{service}）重置失败: {r.stderr.strip()}")
+
+    print("\n权限已清除。请运行 capswriter start 重新启动，按引导重新授权。")
+    return 0
+
+
 def cmd_help(args) -> int:
     """打印详细命令帮助。"""
     print("""
@@ -786,7 +816,11 @@ CapsWriter for macOS — 使用帮助
        # 修改 config_client.py / config_server.py
        capswriter restart
 
-  4. Caps Lock 卡在 F18 映射（救援）：
+  4. 更新/rebuild 后权限失效：
+       capswriter reset-permissions  # 清除旧权限条目
+       capswriter start              # 重新启动，按引导重新授权
+
+  5. Caps Lock 卡在 F18 映射（救援）：
        capswriter stop
        capswriter remap restore   # 恢复快照
        # 或：capswriter remap clear --force（极端情况）
@@ -834,6 +868,7 @@ def _build_parser():
     sub.add_parser('restart',   help='重启后台服务')
     sub.add_parser('status',    help='查看运行状态')
     sub.add_parser('doctor',    help='环境与权限检查')
+    sub.add_parser('reset-permissions', help='重置辅助功能和输入监控权限（更新/rebuild 后使用）')
     sub.add_parser('help',      help='显示详细帮助')
 
     remap_p = sub.add_parser('remap', help='Caps Lock remap 管理')
@@ -851,6 +886,7 @@ COMMANDS = {
     'restart':   cmd_restart,
     'status':    cmd_status,
     'doctor':    cmd_doctor,
+    'reset-permissions': cmd_reset_permissions,
     'help':      cmd_help,
     'remap':     cmd_remap,
 }

@@ -1,6 +1,12 @@
+<div align="center">
+
+<img src="assets/icon/app-icon.png" width="168" alt="CapsWriter for macOS">
+
 # CapsWriter for macOS
 
-> 按住 Caps Lock 说话，松手即输入。完全离线，Apple Silicon 原生加速。
+**按住 Caps Lock 说话，松手即输入。完全离线，Apple Silicon 原生加速。**
+
+</div>
 
 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) 的 Apple Silicon 适配版。原项目面向 Windows 设计，本 fork 为 macOS 重写了推理后端、键盘捕获和进程管理。
 
@@ -81,17 +87,61 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### 第五步：授权（首次启动时）
 
-CapsWriter 需要两项系统权限：（均位于“隐私与安全性”设置）
+CapsWriter 需要两项系统权限（均位于”系统设置 › 隐私与安全性”）：
 
-**辅助功能权限**（用于自动粘贴）
-**输入监控权限**（用于caps lock动作拦截）
+- **辅助功能**（Accessibility）：用于键盘事件拦截和自动粘贴
+- **输入监控**（Input Monitoring）：用于 Caps Lock 按键捕获
 
-启动时若 CapsWriter 检测到权限缺失，会弹出引导对话框并自动打开系统设置，按提示操作即可。
-若对应权限已打开但软件未按预期工作，请在相应设置列表中点击'-'将CapsWriter删除，然后重启软件重新授权。
+首次启动时，CapsWriter 会自动弹出辅助功能授权框并打开系统设置面板，按通知提示依次打开两项开关，然后重启 CapsWriter 即可。
+
+> ⚠️ **重要：开启权限后请用 CLI 重启，不要点系统设置弹窗里的「退出并重新打开」按钮。**
+> 开启「输入监控 / 辅助功能」开关时，macOS 会提示「CapsWriter 需要退出并重新打开才能生效」。
+> **请不要点那个「退出并重新打开」**，而是回到终端执行：
+> ```bash
+> capswriter restart
+> ```
+> 原因见下方「已知问题：双实例」。两项权限里 IM 条目何时出现在列表也由 macOS 决定、并不稳定；
+> **若「输入监控」列表里没有 CapsWriter，请点列表下方「+」号，搜索并添加 CapsWriter 后再打开开关。**
 
 **麦克风权限**
 
 首次录音时 macOS 自动弹出授权对话框，点击「好」即可。
+
+### 权限疑难排查
+
+如果更新了软件（重新运行 `install.sh` 或 `build_launcher.sh`），权限可能因签名变化而失效。此时请先重置权限再重新启动：
+
+```bash
+capswriter reset-permissions   # 清除旧的辅助功能和输入监控权限条目
+capswriter start               # 重新启动，按引导重新授权
+```
+
+如果权限引导反复不成功，也可手动处理：关闭 CapsWriter → 在系统设置的辅助功能和输入监控列表中删除 CapsWriter 条目 → 重新启动软件，按引导重新授权。
+
+### 已知问题：双实例（良性，可规避）
+
+**现象**：在「系统设置 › 隐私与安全性」里给 CapsWriter 开权限时，若点了系统弹窗的
+**「退出并重新打开」**按钮让系统重新拉起客户端，之后再从**菜单栏**「重启 CapsWriter」，
+可能出现**两个 CapsWriter 进程**（菜单栏出现两个图标）。
+
+**影响**：基本无害。**生效的是最新启动的那个实例**，旧的那个已经失效、不再工作；
+键盘接管、录音、识别一切正常，只是多了一个空转的残留进程。
+
+**触发条件很窄**：仅当「本轮客户端是被系统设置面板拉起的」时才会发生。正常的菜单栏重启、
+CLI 重启都**不会**触发。
+
+**根因**：macOS 用 LaunchServices 重新拉起 GUI 应用时，新进程会被「领养」到一个动态标签，
+脱离 launchd 的静态标签管辖，导致此刻的进程查杀短暂失准。这是 GUI 应用同时被 launchd 与
+LaunchServices 管理的固有冲突，详见 `docs/macos-architecture-decisions.md`。
+
+**规避**：开权限后**不要点系统弹窗的「退出并重新打开」**，改用最稳的 CLI：
+```bash
+capswriter restart
+```
+**清理**：万一已经出现双实例，用 CLI 一键清成单实例（CLI 能可靠杀掉所有残留）：
+```bash
+capswriter restart      # 或 capswriter stop 再 capswriter start
+```
 
 ---
 
@@ -134,6 +184,7 @@ capswriter uninstall # 取消自启
 
 ```bash
 capswriter doctor               # 检查环境、权限、模型文件
+capswriter reset-permissions    # 重置辅助功能和输入监控权限（更新/rebuild 后使用）
 capswriter remap status         # 查看当前键盘映射状态
 capswriter remap restore        # 恢复键盘映射（仅限未运行时使用）
 capswriter remap clear --force  # 清空所有键盘映射（救援命令，若您设置有其它键盘映射，谨慎使用）

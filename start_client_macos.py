@@ -281,15 +281,17 @@ class _StatusMenuController(NSObject):
         import subprocess
         py = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [py, str(_CAPSWRITER_PY), cmd],
                 cwd=str(PROJECT_ROOT),
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            _menubar_dbg(f"spawn capswriter {cmd}")
+            # 轻量留痕：记录派生的子进程 PID 与菜单栏自身 PID，便于事后对照双实例时序
+            _menubar_dbg(f"spawn capswriter {cmd} -> child pid={proc.pid} (menubar pid={os.getpid()})")
         except Exception as e:
+            _menubar_dbg(f"spawn capswriter {cmd} FAILED: {e!r}")
             print(f"[CapsWriter.app] 执行 capswriter {cmd} 失败: {e}", file=sys.stderr)
 
 
@@ -470,6 +472,17 @@ def _critical_cleanup() -> None:
     不做音频流/WebSocket 等可能挂起的清理；OS 在进程退出后自动回收所有资源。
     必须用 os._exit(0)（不是 sys.exit），确保 launchd 看到 exit 0，不触发重启。
     """
+    # 看门狗：清理挂住时 2 秒后强制退出。
+    # CGEventTapEnable 在 tap 坏态（AX 被撤）下可能死锁，导致 os._exit 永远走不到、
+    # 进程变僵尸 → 双实例。看门狗保证 SIGTERM 后进程必定在 2s 内退出。
+    def _watchdog():
+        time.sleep(2.0)
+        # 必须 os._exit(0)：非零退出会被 launchd KeepAlive(SuccessfulExit=false) 当成崩溃
+        # 而复活进程 → 与显式 start / 被领养的孤儿相撞 → 双实例。看门狗的职责只是「保证
+        # 进程一定退出」，而非「报告失败」，所以这里同样用 0。
+        os._exit(0)
+    threading.Thread(target=_watchdog, daemon=True, name="CleanupWatchdog").start()
+
     global _client, _error_bus
     # 最关键：恢复 Caps Lock remap（hidutil 持久化系统状态，进程退出后不自动恢复）
     with _client_lock:
@@ -482,7 +495,7 @@ def _critical_cleanup() -> None:
             pass
         if getattr(c, 'remap_session', None) is not None:
             try:
-                c.remap_session.restore()
+                c.remap_session.restore()  # 内部有双实例 PID 保护，不会覆盖新实例的 remap
             except Exception:
                 pass
     # 清理进程级文件
