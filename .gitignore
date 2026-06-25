@@ -167,6 +167,8 @@ models/**/*.json
 models/**/merges.txt
 models/**/tokenizer.model
 models/**/*.tiktoken
+models/**/.gitattributes
+models/**/README.md
 
 # 日志与按年归档的文件夹（如 2026/01/...）及其他四位数字年份目录
 [0-9][0-9][0-9][0-9]/
