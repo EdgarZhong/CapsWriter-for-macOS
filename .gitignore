@@ -162,6 +162,12 @@ models/**/*.npz
 models/**/.cache/
 models/*.py
 
+# 模型分词器/配置文本（防止像 Qwen3-ASR-8bit 那样把 HF 克隆来的文件误提交进仓库）
+models/**/*.json
+models/**/merges.txt
+models/**/tokenizer.model
+models/**/*.tiktoken
+
 # 日志与按年归档的文件夹（如 2026/01/...）及其他四位数字年份目录
 [0-9][0-9][0-9][0-9]/
 
