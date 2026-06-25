@@ -30,9 +30,8 @@
 ### 第一步：克隆仓库
 
 ```bash
-git clone https://github.com/EdgarZhong/CapsWriter-Offline.git
-cd CapsWriter-Offline
-git checkout mac-dev
+git clone https://github.com/EdgarZhong/CapsWriter-for-macOS.git
+cd CapsWriter-for-macOS
 ```
 
 ### 第二步：本地安装
@@ -222,7 +221,8 @@ capswriter restart
 
 | 项目 | 原版（Windows） | 本 fork（macOS） |
 |------|----------------|-----------------|
-| 推理后端 | GGUF + ONNX | Apple MLX |
+| 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
+| 推理后端 | ONNX（sherpa-onnx） | Apple MLX |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |
@@ -233,8 +233,9 @@ capswriter restart
 
 - [x] 菜单栏图标（矢量 template，深浅色自适应）
 - [x] 菜单栏状态显示与下拉菜单
-- [ ] 简洁精美的GUI
-- [ ] ASR推理精度调优
+- [x] 权限引导重写与进程生命周期稳定化
+- [ ] 简洁精美的 GUI
+- [ ] ASR 推理精度调优（进行中）
 - [ ] .dmg 一键安装包
 
 ## 致谢
