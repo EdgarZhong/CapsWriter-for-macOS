@@ -64,7 +64,7 @@ bash install.sh
 uv pip install --python .venv/bin/python huggingface_hub
 
 # 下载默认规格（8bit，约 1.8 GB）
-.venv/bin/huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+.venv/bin/hf download mlx-community/Qwen3-ASR-1.7B-8bit \
   --local-dir models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit
 ```
 
