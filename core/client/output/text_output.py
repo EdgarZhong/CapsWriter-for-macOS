@@ -57,16 +57,50 @@ class TextOutput:
         if paste is None:
             paste = Config.paste
 
-        # macOS 下优先使用剪贴板粘贴。
-        # 原实现依赖 `keyboard.write`，该库在 macOS 上不稳定，且对中文输入法兼容性差。
-        # 为了保证“识别完成即可可靠上屏”，这里强制走更稳的粘贴链路。
         if platform.system() == 'Darwin':
-            paste = True
+            await self._output_macos(text, force_clipboard=bool(paste))
+            return
         
         if paste:
             await self._paste_text(text)
         else:
             self._type_text(text)
+
+    async def _output_macos(self, text: str, force_clipboard: bool = False) -> None:
+        """macOS 输出：默认保留剪贴板粘贴，可显式切换到 Quartz 注入。"""
+        backend = str(getattr(Config, 'macos_output_backend', 'clipboard')).lower()
+        if backend in ('paste', 'clip'):
+            backend = 'clipboard'
+
+        if force_clipboard or backend == 'clipboard':
+            await self._paste_text(text)
+            return
+
+        if backend not in ('quartz', 'auto'):
+            logger.warning(f"未知 macOS 输出方式: {backend}，回退到 clipboard")
+            await self._paste_text(text)
+            return
+
+        try:
+            from core.client.output.macos_quartz import (
+                QuartzOutputOptions,
+                QuartzTextInjector,
+            )
+
+            options = QuartzOutputOptions(
+                chunk_size=getattr(Config, 'macos_quartz_chunk_size', 8),
+                key_delay=getattr(Config, 'macos_quartz_key_delay', 0.002),
+            )
+            QuartzTextInjector(options).type_text(text)
+            return
+        except Exception as e:
+            logger.warning(f"Quartz 文本注入失败: {e}", exc_info=True)
+
+        if backend == 'auto' or getattr(Config, 'macos_clipboard_fallback', False):
+            logger.warning("本次将使用剪贴板粘贴作为 fallback")
+            await self._paste_text(text)
+        else:
+            logger.warning("未启用剪贴板 fallback，跳过本次自动上屏以避免污染剪贴板")
     
     async def _paste_text(self, text: str) -> None:
         """

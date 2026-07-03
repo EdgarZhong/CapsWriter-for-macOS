@@ -50,7 +50,9 @@ def _resolve_output_mode(paste: bool = None) -> bool:
 async def handle_typing_mode(handler, text: str, paste: bool = None, matched_hotwords=None, role_config=None, content=None) -> tuple:
     """打字输出模式"""
     from .llm_error_handler import handle_llm_error
+    force_clipboard = paste is True
     paste = _resolve_output_mode(paste)
+    output_paste = True if force_clipboard else (None if platform.system() == 'Darwin' else paste)
 
     # 如果没传，则现场检测一次（兼容性）
     if not role_config or content is None:
@@ -59,25 +61,25 @@ async def handle_typing_mode(handler, text: str, paste: bool = None, matched_hot
     if not role_config:
         # 不应发生，但作为防守
         result_text = TextOutput.strip_punc(text)
-        await output_text(result_text, paste)
+        await output_text(result_text, output_paste)
         return (result_text, 0, 0.0)
 
     handler.monitor.reset()  # 重置停止标志
 
     try:
         if paste:
-            return await _process_paste(handler, role_config, content, matched_hotwords)
+            return await _process_paste(handler, role_config, content, matched_hotwords, force_clipboard)
         else:
             return await _process_streaming(handler, role_config, content, matched_hotwords)
 
     except Exception as e:
         result_text, _ = handle_llm_error(e, content, role_config.name if role_config else "LLM")
         result_text = TextOutput.strip_punc(result_text)
-        await output_text(result_text, paste)
+        await output_text(result_text, output_paste)
         return (result_text, 0, 0.0)
 
 
-async def _process_paste(handler, role_config, content, matched_hotwords) -> tuple:
+async def _process_paste(handler, role_config, content, matched_hotwords, force_clipboard: bool = False) -> tuple:
     """处理粘贴模式：获取全文后一次性粘贴"""
     polished_text, token_count, gen_time = await to_thread(
         handler.process, role_config, content, matched_hotwords, None
@@ -86,7 +88,7 @@ async def _process_paste(handler, role_config, content, matched_hotwords) -> tup
         return ("", 0, 0.0)
 
     final_text = TextOutput.strip_punc(polished_text or content)
-    await paste_text(final_text, restore_clipboard=Config.restore_clip)
+    await output_text(final_text, paste=True if force_clipboard else None)
     return (final_text, token_count, gen_time)
 
 
@@ -151,6 +153,12 @@ async def _process_streaming(handler, role_config, content, matched_hotwords) ->
 
 async def output_text(text: str, paste: bool = None):
     """输出文本（根据 paste 或 Config.paste 选择方式）"""
+    if platform.system() == 'Darwin':
+        backend = str(getattr(Config, 'macos_output_backend', 'clipboard')).lower()
+        if paste is not True and backend in ('quartz', 'auto'):
+            await TextOutput().output(text, paste=False)
+            return
+
     paste = _resolve_output_mode(paste)
     if paste:
         await paste_text(text, restore_clipboard=Config.restore_clip)
