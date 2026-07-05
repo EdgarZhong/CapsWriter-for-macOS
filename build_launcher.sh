@@ -52,7 +52,9 @@ echo "  Lib:     $PY_LIBDIR / $PY_LDLIB"
 echo "  RPath:   @executable_path/../../../.venv/lib"
 echo "  Output:  $OUT"
 
+SDK_PATH="$(xcrun --show-sdk-path)"
 clang -std=c11 -Wall -Wextra -O2 -arch arm64 \
+    -isysroot "$SDK_PATH" \
     -I"$PY_INC" \
     -DCW_PY_VERSION="\"$PY_VER\"" \
     "$SRC" \
