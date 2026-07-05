@@ -50,6 +50,10 @@ class ClientConfig:
     paste        = False        # 是否以写入剪切板然后模拟 Ctrl-V 粘贴的方式输出结果
     restore_clip = True         # 模拟粘贴后是否恢复剪贴板
     paste_apps   = ['WeiXin.exe', 'Telegram.exe']  # 匹配时强制粘贴
+    macos_output_backend = 'clipboard' # macOS 输出方式：'clipboard'（默认）或 'quartz'（不写剪贴板）
+    macos_clipboard_fallback = False   # Quartz 注入失败时是否退回剪贴板粘贴
+    macos_quartz_chunk_size = 8        # Quartz 每次注入的字符数；越小越稳，越大越快
+    macos_quartz_key_delay = 0.002     # Quartz 注入分块间隔（秒）
 
     save_audio = True           # 是否保存录音文件
     audio_name_len = 20         # 将录音识别结果的前多少个字存储到录音文件名中，建议不要超过200

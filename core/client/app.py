@@ -83,7 +83,21 @@ class CapsWriterClient:
         self.macos_caps_bridge: Optional[MacOSCapsF18Bridge] = None
         self.remap_session = None  # macOS remap 生命周期由 client 自身持有
 
-        if system() == 'Darwin' and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18':
+        # 只有配置里确实启用了 Caps Lock 快捷键时，才启动 Caps 专用的 remap/F18 桥接。
+        # 这样用户把快捷键改成 right ctrl、鼠标侧键等普通输入时，即使忘了同步把
+        # macos_caps_mode 改为 off，也不会误写系统级 Caps Lock -> F18 映射。
+        has_enabled_caps_shortcut = any(
+            shortcut.enabled and shortcut.type == 'keyboard' and shortcut.key == 'caps_lock'
+            for shortcut in self.shortcut.shortcuts
+        )
+        # 注意：macos_caps_remap_enabled 当前与 macos_caps_mode 的职责重叠，历史上也没有
+        # 参与主流程判断。这里先保留既有语义，只按 mode + 是否实际使用 Caps Lock 决定；
+        # 后续是否合并/废弃这两个配置，留给仓库维护者统一收敛。
+        if (
+            system() == 'Darwin'
+            and has_enabled_caps_shortcut
+            and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18'
+        ):
             from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
             from .shortcut.macos_caps_remap import MacOSCapsRemapSession
 
@@ -173,4 +187,3 @@ class CapsWriterClient:
             self.loop.run_until_complete(runner.run())
         except RuntimeError:
             ...
-
