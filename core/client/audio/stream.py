@@ -193,17 +193,50 @@ class AudioStreamManager:
         logger.info("音频流意外结束，正在尝试重启...")
         self.reopen()
     
+    def _reload_portaudio(self) -> None:
+        """
+        重载 PortAudio，强制刷新音频设备列表与默认输入设备。
+
+        PortAudio 在首次 `import sounddevice` 时会把整张设备列表和默认设备
+        索引一次性缓存（`Pa_Initialize`），运行期不会自动刷新。当系统音频拓扑
+        发生变化时——例如：
+        - 接入/拔出耳机、AirPods、USB 麦克风（默认输入设备被 macOS 切换）；
+        - 启动 SoundSource 等使用虚拟音频驱动（ACE/ARK）的软件（设备增删）；
+        旧缓存里的设备句柄/默认索引会失效，导致 `device=None` 指向错误或
+        失效的设备而录不到音。本方法走 terminate → 重新 dlopen → initialize
+        的流程重建缓存，使后续 `query_devices` / `InputStream(device=None)`
+        都基于当前真实的设备拓扑与默认输入设备。
+
+        注意：重载会使所有已打开的流失效，因此只应在“当前没有打开着的流”时调用
+        （macOS 按需开流模式下每次 start() 时即满足此条件）。
+        """
+        try:
+            sd._terminate()
+            sd._ffi.dlclose(sd._lib)
+            sd._lib = sd._ffi.dlopen(sd._libname)
+            sd._initialize()
+        except Exception as e:
+            logger.warning(f"重载 PortAudio 时发生警告: {e}")
+
     def start(self) -> Optional[sd.InputStream]:
         """
         启动音频流
-        
+
         Returns:
             创建的音频输入流，如果失败返回 None
         """
         if self._running:
             logger.debug("音频流已在运行，跳过启动")
             return self.state.stream
-            
+
+        # macOS 按需开流：每次建流前重载 PortAudio，刷新设备列表与默认输入设备。
+        # 这样无论用户在系统设置里切换了麦克风、插拔了耳机，还是启动了 SoundSource
+        # 等带虚拟音频驱动的软件改变了设备拓扑，本次录音都能跟随当前真实的默认输入
+        # 设备，不再需要重启客户端。此处 start() 一定是在“无打开流”状态下被调用，
+        # 重载是安全的。
+        if platform.system() == 'Darwin':
+            self._reload_portaudio()
+
         # 检测音频设备
         try:
             device = sd.query_devices(kind='input')
@@ -285,16 +318,10 @@ class AudioStreamManager:
         
         # 停止旧流
         self.stop()
-        
-        # 重载 PortAudio，更新设备列表
-        try:
-            sd._terminate()
-            sd._ffi.dlclose(sd._lib)
-            sd._lib = sd._ffi.dlopen(sd._libname)
-            sd._initialize()
-        except Exception as e:
-            logger.warning(f"重载 PortAudio 时发生警告: {e}")
-        
+
+        # 重载 PortAudio，更新设备列表（与 start() 复用同一逻辑）
+        self._reload_portaudio()
+
         # 等待设备稳定
         time.sleep(0.1)
         

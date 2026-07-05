@@ -37,6 +37,23 @@ if TYPE_CHECKING:
     from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
 
 
+def _has_enabled_caps_lock_shortcut(shortcuts: list[Shortcut]) -> bool:
+    """
+    判断当前配置是否真的启用了 Caps Lock 快捷键。
+
+    macOS 的 `remap_f18` 是系统级 `hidutil` 映射，会把物理 Caps Lock 临时改成
+    F18。这个能力只能在用户实际把 Caps Lock 作为快捷键时启用；如果用户改成
+    right ctrl、F12、鼠标侧键等其它快捷键，即使历史配置项仍是 `remap_f18`，
+    也不能写入全局键盘映射，避免无关修改系统键盘状态。
+    """
+    return any(
+        shortcut.enabled
+        and shortcut.type == 'keyboard'
+        and shortcut.key == 'caps_lock'
+        for shortcut in shortcuts
+    )
+
+
 class CapsWriterClient:
     """
     CapsWriter 客户端门面类
@@ -83,7 +100,11 @@ class CapsWriterClient:
         self.macos_caps_bridge: Optional[MacOSCapsF18Bridge] = None
         self.remap_session = None  # macOS remap 生命周期由 client 自身持有
 
-        if system() == 'Darwin' and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18':
+        if (
+            system() == 'Darwin'
+            and getattr(Config, 'macos_caps_mode', 'off') == 'remap_f18'
+            and _has_enabled_caps_lock_shortcut(self.shortcut.shortcuts)
+        ):
             from .shortcut.macos_caps_f18 import MacOSCapsF18Bridge
             from .shortcut.macos_caps_remap import MacOSCapsRemapSession
 
@@ -173,4 +194,3 @@ class CapsWriterClient:
             self.loop.run_until_complete(runner.run())
         except RuntimeError:
             ...
-
