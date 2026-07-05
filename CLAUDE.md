@@ -112,6 +112,7 @@ launchd
 
 | 优先级 | 任务 |
 |--------|------|
+| P0 | ✅ **非 Caps 快捷键不加载 hidutil remap / F18 bridge**：2026-07-05 已修复并完成最小验证。`CapsWriterClient` 只在 macOS、`macos_caps_mode=remap_f18` 且当前启用快捷键中确实包含 `caps_lock` 时创建 `MacOSCapsRemapSession` / `MacOSCapsF18Bridge`；若用户改用 right ctrl、F12、鼠标侧键等非 Caps 快捷键，不再写入系统级 Caps Lock→F18 映射。验证：`.venv/bin/python -m py_compile core/client/app.py`；纯函数断言覆盖 Caps 启用、Caps 禁用、其它键、鼠标键四类配置。 |
 | **P0：权限引导重写** | ✅ **2026-06-24 实测主路通过 + 二次收敛落地**。两权限都引导 + `run_guide` 状态机 + option C 启动校验 ping + 绝不退出进程 + **砍掉手动面板/stale 交给 reset-permissions**。剩余复验项见「实测进度」表 #5–9（重点：菜单栏绿点修复复验、运行中撤 AX 键盘恢复、stale/reset-permissions/perm_phase）。 |
 | P0 | 用同一批音频样本对比 `qwen_asr_mlx` 与 Windows `qwen_asr` 路线，区分“量化差异”与“接入差异” |
 | P0 | fork `mlx-qwen3-asr`，摆脱 `Session.transcribe()` 黑盒接法，优先夺回 prompt 组装、language/context 策略、generation config 的控制权 |
@@ -145,6 +146,15 @@ launchd
 ---
 
 ## 最近故障记录
+
+### 2026-06-29：SoundSource 等虚拟音频驱动 / 插拔耳机导致录音失效
+
+- 复现时间：2026-06-29。用户安装 SoundSource（Rogue Amoeba，底层 ACE/ARK 虚拟音频驱动，用于均衡浏览器音频听网课）。
+- 现象：SoundSource 一开，麦克风即失效、CapsWriter 录不到音；**关掉 SoundSource 也无效，只能重启客户端**才恢复。
+- 根因（已修，提交 `dfc50a1`）：`sounddevice`/PortAudio 首次 import 时 `Pa_Initialize` 把整张设备列表与默认输入设备索引一次性缓存，运行期不刷新。SoundSource 的虚拟驱动加载会改变 CoreAudio 设备拓扑（设备增删、默认输入切换），旧缓存里的设备句柄/默认索引失效 → `sd.InputStream(device=None)` 指向错误/失效设备录不到音；缓存只在进程初始化时建立，故关掉干扰软件无效、只有重启进程重走 `Pa_Initialize` 才恢复。**同一根因也会让「插拔耳机/AirPods/USB 麦切换默认输入」后录音不跟随。**
+- 对策：`core/client/audio/stream.py` 抽出 `_reload_portaudio()`（terminate → 重新 dlopen → initialize，复用原 `reopen()` 逻辑）；**macOS 下每次 `start()` 建流前先调它刷新设备列表与默认输入**（按需开流模式 start() 必在「无打开流」状态被调用，重载安全）；`reopen()` 改调同一 helper 去重。
+- 口径收敛：**不写「按名字匹配/记住上次设备」逻辑**——开流坚持 `device=None`（= 跟随 CoreAudio `kAudioHardwarePropertyDefaultInputDevice`，即系统设置→声音→输入选中项，macOS 会自动为耳机/AirPods 切换）+ 开流前刷新，即「用户在系统设置里选谁就用谁」，最简且最符合直觉。已修复后 SoundSource 开关、插拔耳机均自动跟随，无需重启客户端、无需手动选。
+- 代价：每次开流前多一次 PortAudio 重载（几十毫秒量级）。用户实测确认录音成功，**延迟问题暂不优化**（可等菜单栏麦克风胶囊出现后再开口）。
 
 ### 2026-06-24：权限引导实测三个问题（旧进程残留 + 绿点不灭）
 
