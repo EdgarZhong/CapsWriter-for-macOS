@@ -18,39 +18,42 @@ from . import logger
 
 
 class WorkBuffer:
-    """按 task_id 分组缓冲工作单元，支持跨 session 轮转出队。"""
+    """同连接保持接收顺序，跨连接轮转，避免后录的句子抢在前句之前返回。"""
     def __init__(self, state: WorkerState):
         self.state = state
         self._buffers: OrderedDict[str, deque] = OrderedDict()
 
     def enqueue(self, work):
-        """将工作单元放入对应 task_id 的缓冲尾部（同 session 内 FIFO）。
-        首次遇到新 task_id 时预创建 session。"""
-        tid = work.task_id
-        if tid not in self._buffers:
-            self._buffers[tid] = deque()
-            self.state.get_session(tid, work.socket_id, work.source)
-        self._buffers[tid].append(work)
+        """以socket分组而非task分组，保留连续录音之间的final先后关系。"""
+        sid = work.socket_id
+        if sid not in self._buffers:
+            self._buffers[sid] = deque()
+        self.state.get_session(work.task_id, sid, work.source)
+        self._buffers[sid].append(work)
 
     def pop(self):
-        """取出最新 session 的下一个工作单元。没有待处理项时返回 None。"""
+        """轮到的连接只消费一块，再移到队尾；该连接内部始终FIFO。"""
         if not self._buffers:
             return None
 
-        tid, buf = next(reversed(self._buffers.items()))
+        sid, buf = self._buffers.popitem(last=False)
         work = buf.popleft()
 
-        if not buf:
-            del self._buffers[tid]
+        if buf:
+            self._buffers[sid] = buf
 
         return work
 
     def cleanup_works(self):
         """清理已断开连接 session 的缓冲工作单元。"""
-        for tid in list(self._buffers):
-            if tid not in self.state.sessions:
-                logger.debug(f"清理断开连接的 session: {tid[:8]}")
-                del self._buffers[tid]
+        for sid, buf in list(self._buffers.items()):
+            # 一个连接可以包含多次录音；只移除失效session的工作单元，不能把
+            # task_id当socket_id查找，也不能因一条结束而误清同连接的下一条。
+            live = deque(work for work in buf if work.task_id in self.state.sessions)
+            if live:
+                self._buffers[sid] = live
+            else:
+                del self._buffers[sid]
 
     @property
     def is_empty(self) -> bool:
@@ -64,6 +67,9 @@ class WorkHandler:
     协调输入输出队列与识别引擎之间的工作单元流。
     支持跨 socket 公平轮转调度。
     """
+    # 连续输入不能占满整个循环；有限批量后必须让pipeline处理已有数据。
+    MAX_DRAIN_ITEMS = 64
+
     def __init__(self, queue_in: Queue, queue_out: Queue, sockets_id: ListProxy, state: WorkerState):
         self.queue_in = queue_in
         self.queue_out = queue_out
@@ -91,14 +97,18 @@ class WorkHandler:
             self.pipeline = WorkPipeline(recognizer, punc_model, aligner, self.state)
 
     def drain_queue(self) -> bool:
-        """Drain 队列中所有工作单元到缓冲区。Returns: False = 退出信号。"""
-        while True:
-            # 获取工作单元
+        """有积压时仅收取当前可读的一批；只有完全空闲才阻塞等待首包。"""
+        received = 0
+        while received < self.MAX_DRAIN_ITEMS:
             try:
                 if self.buffer.is_empty:
                     work = self.queue_in.get(timeout=1)
                 else:
-                    work = self.queue_in.get(timeout=0.02)
+                    # 20ms音频流会让旧timeout=0.02不断收到新包而不消费，
+                    # 松手后又逐包等20ms。积压时必须立刻消费，不能等未来包。
+                    # multiprocessing.Queue的feeder尚未交付时可能暂时Empty；
+                    # 下一轮自然重试，不使用不可靠的empty()/qsize()判定。
+                    work = self.queue_in.get_nowait()
             except queue.Empty:
                 if self.buffer.is_empty:
                     self.cleanup_engines()
@@ -112,6 +122,9 @@ class WorkHandler:
             if work is None:
                 return False
 
+            # 断连包同样占用本轮预算，防止大量失效输入阻塞已有有效工作。
+            received += 1
+
             # 跳过已断开连接客户端的工作单元
             if work.socket_id not in self.sockets_id:
                 logger.debug(f"跳过断连客户端工作单元: {work.task_id[:8]}")
@@ -119,6 +132,8 @@ class WorkHandler:
 
             # 工作单元进入缓冲区
             self.buffer.enqueue(work)
+
+        return True
 
     def cleanup(self):
         """清理断连 socket 的缓冲工作单元和 session。"""
@@ -130,8 +145,10 @@ class WorkHandler:
             # Runner 内部也持有按 task_id 聚合的音频缓冲；session 清理时必须同步释放，
             # 否则客户端断连会把未 final 的长音频留在 worker 进程内。
             self.pipeline.cleanup_tasks(stale_task_ids)
-        self.state.cleanup_sessions(self.sockets_id)
-        self.buffer.cleanup_works()
+        if self.state.cleanup_sessions(self.sockets_id):
+            # 只有实际断连才扫描包队列；正常逐包消费无需反复复制全部积压数据，
+            # 否则较长文件传输会把清理本身变成二次方开销。
+            self.buffer.cleanup_works()
 
     def cleanup_engines(self):
         """时间戳引擎空闲时自动卸载。"""

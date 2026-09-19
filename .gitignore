@@ -230,6 +230,7 @@ evals/manual_cases/v2/audio/
 # 例外：随代码入库的回归测试脚本
 tools/test_*.py
 !tools/test_stream_stop_leak.py
+!tools/test_worker_scheduling.py
 !tools/test_editor_annotation.py
 
 # 准确率取证目录：只提交转写/续传脚本，录音副本、转写结果、清单与运行日志不入库
