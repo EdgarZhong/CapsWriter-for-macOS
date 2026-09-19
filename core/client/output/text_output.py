@@ -40,7 +40,7 @@ class TextOutput:
         clean_text = re.sub(f"(?<=.)[{Config.trash_punc}]$", "", text)
         return clean_text
     
-    async def output(self, text: str, paste: Optional[bool] = None) -> None:
+    async def output(self, text: str, paste: Optional[bool] = None) -> bool:
         """
         输出识别结果
         
@@ -49,9 +49,12 @@ class TextOutput:
         Args:
             text: 要输出的文本
             paste: 是否使用粘贴方式（None 表示使用配置值）
+
+        Returns:
+            文本是否已成功交给输出链路；粘贴模式以写入剪贴板成功为准。
         """
         if not text:
-            return
+            return False
         
         # 确定输出方式
         if paste is None:
@@ -64,11 +67,12 @@ class TextOutput:
             paste = True
         
         if paste:
-            await self._paste_text(text)
+            return await self._paste_text(text)
         else:
             self._type_text(text)
+            return True
     
-    async def _paste_text(self, text: str) -> None:
+    async def _paste_text(self, text: str) -> bool:
         """
         通过粘贴方式输出文本
         
@@ -76,7 +80,7 @@ class TextOutput:
             text: 要粘贴的文本
         """
         logger.debug(f"使用粘贴方式输出文本，长度: {len(text)}")
-        await paste_text(text, restore_clipboard=Config.restore_clip)
+        return await paste_text(text, restore_clipboard=Config.restore_clip)
     
     def _type_text(self, text: str) -> None:
         """

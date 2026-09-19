@@ -139,6 +139,32 @@ def copy_to_clipboard(content: str):
     safe_copy(content)
 
 
+def _post_macos_paste_shortcut() -> bool:
+    """用进程内 Quartz 直接发送 Cmd+V，成功返回 True。
+
+    旧路径每次启动 `osascript` 再让 System Events 注入按键，单次进程启动就会
+    引入约 175ms 延迟。CapsWriter 已持有辅助功能权限，直接发布 CGEvent 能保留
+    相同权限边界，并把正常路径的注入开销降到毫秒级。异常时由调用方回退旧路径。
+    """
+    try:
+        import Quartz
+
+        source = Quartz.CGEventSourceCreate(
+            Quartz.kCGEventSourceStateHIDSystemState)
+        # ANSI V 的 macOS 虚拟键码固定为 0x09；down/up 都带 Command 标志，
+        # 避免目标应用把事件解释成普通字母 v。
+        key_down = Quartz.CGEventCreateKeyboardEvent(source, 0x09, True)
+        key_up = Quartz.CGEventCreateKeyboardEvent(source, 0x09, False)
+        Quartz.CGEventSetFlags(key_down, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventSetFlags(key_up, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)
+        return True
+    except Exception as e:
+        logger.warning(f"Quartz Cmd+V 注入失败，回退 osascript: {e}")
+        return False
+
+
 @contextmanager
 def save_and_restore_clipboard():
     """
@@ -158,48 +184,58 @@ def save_and_restore_clipboard():
             logger.debug("剪贴板已恢复")
 
 
-async def paste_text(text: str, restore_clipboard: bool = True):
+async def paste_text(text: str, restore_clipboard: bool = True) -> bool:
     """
     通过模拟 Ctrl+V 粘贴文本
 
     Args:
         text: 要粘贴的文本
         restore_clipboard: 粘贴后是否恢复原剪贴板内容
+
+    Returns:
+        文本是否已成功写入剪贴板。macOS 的 Cmd+V 注入可能因辅助功能权限失败，
+        但此时用户仍可手动粘贴，因此只要复制成功就返回 True。
     """
-    # 保存剪切板
+    is_macos = platform.system() == 'Darwin'
+
+    # macOS 产品口径本来就不恢复旧剪贴板，因此不能为一个不会使用的值额外启动
+    # pbpaste 子进程；其它平台仍按原行为保存并在粘贴后恢复。
     original: Optional[str] = None
-    if restore_clipboard:
+    if restore_clipboard and not is_macos:
         try:
             original = safe_paste()
         except Exception as e:
             logger.warning(f"读取原始剪贴板失败，跳过恢复流程: {e}")
 
     # 复制要粘贴的文本
-    safe_copy(text)
+    # “输出成功”的语义边界是目标文本已进入剪贴板。写入失败时绝不能继续发送
+    # Cmd+V，否则会把用户原有剪贴板内容误粘贴到前台应用。
+    if not safe_copy(text):
+        logger.warning("识别文本写入剪贴板失败，已跳过自动粘贴")
+        return False
     logger.debug(f"已复制文本到剪贴板，长度: {len(text)}")
 
-    # macOS 下 pbcopy 是子进程，给一点时间让剪贴板内容落定
-    if platform.system() == 'Darwin':
-        await asyncio.sleep(0.05)
-
     # 粘贴结果
-    if platform.system() == 'Darwin':
-        # macOS: 用 osascript 注入 Cmd+V，pynput 模拟的按键在新版 macOS 不被前台应用接受
-        result = subprocess.run(
-            ['osascript', '-e', 'tell application "System Events" to keystroke "v" using command down'],
-            check=False,
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode().strip()
-            if '1002' in stderr or 'not allowed' in stderr.lower() or '不允许' in stderr:
-                logger.warning(
-                    "自动粘贴失败（缺少辅助功能权限）。"
-                    "请前往：系统设置 → 隐私与安全性 → 辅助功能 → 添加运行 client 的终端 app，"
-                    "然后重启 client。识别结果已写入剪贴板，可手动 Cmd+V 粘贴。"
-                )
-            else:
-                logger.warning(f"osascript 粘贴失败: {stderr}")
+    if is_macos:
+        # 正常路径直接在进程内发 Quartz 事件；只有 PyObjC/事件创建异常才启动
+        # 较慢的 AppleScript 兜底，避免每次 Enter 都支付固定进程启动成本。
+        if not _post_macos_paste_shortcut():
+            result = subprocess.run(
+                ['osascript', '-e',
+                 'tell application "System Events" to keystroke "v" using command down'],
+                check=False,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.decode().strip()
+                if '1002' in stderr or 'not allowed' in stderr.lower() or '不允许' in stderr:
+                    logger.warning(
+                        "自动粘贴失败（缺少辅助功能权限）。"
+                        "请前往：系统设置 → 隐私与安全性 → 辅助功能 → 添加运行 client 的终端 app，"
+                        "然后重启 client。识别结果已写入剪贴板，可手动 Cmd+V 粘贴。"
+                    )
+                else:
+                    logger.warning(f"osascript 粘贴失败: {stderr}")
     else:
         # Windows/Linux: pynput 模拟 Ctrl+V
         from pynput import keyboard as _kb
@@ -211,7 +247,9 @@ async def paste_text(text: str, restore_clipboard: bool = True):
 
     # macOS 下不恢复剪贴板：识别结果应保留在剪贴板，
     # 让用户在 osascript 粘贴失败时仍可手动 Cmd+V 或通过 Maccy 等工具回看。
-    if restore_clipboard and original is not None and platform.system() != 'Darwin':
+    if restore_clipboard and original is not None and not is_macos:
         await asyncio.sleep(0.1)
         if safe_copy(original):
             logger.debug("剪贴板已恢复")
+
+    return True

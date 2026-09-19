@@ -48,6 +48,8 @@ class AudioRecorder:
             app: 客户端 App 实例
         """
         self.app = app
+        # 每个消费者冻结自己的队列；上一条仍在收尾时，新录音可以安全使用新队列。
+        self._queue_in = app.state.queue_in
         self.task_id: Optional[str] = None
         self._file_manager: Optional[AudioFileManager] = None
         self._start_time: float = 0.0
@@ -107,8 +109,8 @@ class AudioRecorder:
                 self._file_manager = AudioFileManager()
             
             # 从队列读取数据
-            while task := await self.state.queue_in.get():
-                self.state.queue_in.task_done()
+            while task := await self._queue_in.get():
+                self._queue_in.task_done()
                 
                 if task['type'] == 'begin':
                     self._start_time = task['time']
@@ -140,7 +142,9 @@ class AudioRecorder:
                     
                     # 获取音频数据
                     if self._cache:
-                        data = np.concatenate(self._cache)
+                        # 越过缓存阈值的当前块尚未入缓存，必须一并发送/保存；旧实现
+                        # 只拼缓存，导致每条录音在起始阈值处固定漏掉一个音频块。
+                        data = np.concatenate([*self._cache, task['data']])
                         self._cache.clear()
                     else:
                         data = task['data']

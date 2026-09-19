@@ -39,6 +39,10 @@ class QwenMLXRunnerPipeline:
         非 final 增量只进入 Runner 缓冲，不向主进程返回识别消息；final 增量触发
         Runner 完成该 task_id 的完整离线结果，并返回 CapsWriter Result。
         """
+        # submit来自主进程，wall clock用于跨进程排队时间；本进程处理耗时
+        # 使用单调时钟。只有final输出汇总，避免将等包积压误报为模型变慢。
+        queue_wait = max(0.0, time.time() - work.time_submit)
+        processing_started = time.perf_counter()
         session = self.state.get_session(work.task_id, work.socket_id, work.source)
         result = session.result
         result.time_start = work.time_start
@@ -62,6 +66,7 @@ class QwenMLXRunnerPipeline:
         if runner_result is None:
             return None
 
+        processing_time = time.perf_counter() - processing_started
         result.time_complete = time.time()
         result.duration = float(runner_result.duration)
         result.text = runner_result.text
@@ -80,6 +85,7 @@ class QwenMLXRunnerPipeline:
         logger.info(
             f"工作单元完成: {work.task_id[:8]}, 引擎=qwen_asr_mlx_runner, "
             f"时长={result.duration:.2f}s, 耗时={process_time:.3f}s, RTF={rtf:.3f}, "
+            f"final排队={queue_wait:.3f}s, final处理={processing_time:.3f}s, "
             f"finish_reason={runner_result.finish_reason}, truncated={runner_result.truncated}"
         )
 

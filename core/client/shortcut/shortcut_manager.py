@@ -286,6 +286,16 @@ class ShortcutManager:
         - 一旦确认是长按，应该立即进入现有录音链路，而不是再走一遍
           `hold_mode` 的键盘事件状态机。
         """
+        # 编辑框打开期间忽略新录音触发（v1 简化）：此时焦点在编辑面板上，
+        # 目标应用光标已不可靠，且旧面板未决会与新一轮识别结果互相覆盖。
+        try:
+            from core.client.output.edit_panel import is_active as _editor_active
+            if _editor_active():
+                logger.warning("[editor] 编辑框打开中，忽略新的录音触发")
+                return
+        except Exception:
+            pass
+
         task = self.tasks.get(key_name)
         if task is None:
             logger.debug(f"[{key_name}] 未找到快捷键任务，忽略 start_press_to_talk")

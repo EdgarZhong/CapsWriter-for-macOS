@@ -429,68 +429,67 @@ macOS TCC 授权记录**绑代码签名**（ad-hoc 绑 cdhash，每次重签名�
 
 ---
 
-## 九、模型常驻内存（MLX 权重 wiring）与启动预热
+## 九、模型常驻内存与启动预热
 
-> 状态：**方案已敲定，待实施**（2026-06-22）。实施位置取决于 `mlx-qwen3-asr` fork 落地，见本节「实施顺序与归属」。在 fork 成为可编辑源码之前**不动代码**。
+### 两种行为（2026-09-19 用户确认）
 
-### 要解决的问题与边界
+`config_server.py::Qwen3ASRMLXArgs.enable_wired_memory` 是唯一常驻开关，修改后重启server生效：
 
-- **要解决**：`qwen_asr_mlx` 在 macOS 上**偶发的首次识别延迟极高**（实测可达 ~2 分钟，见自动记忆 `project_perf_memory_pressure`）。基本可确定是**权重被换出**所致：MLX 权重在 Apple Silicon 上走 Metal 统一内存（可分页），空闲或内存压力期间会被 macOS 压缩 / 换出到 swapfile；再次推理时这些权重要先被搬回物理内存，这段搬运开销就是那次高延迟。
-- **不在范围内**：系统内存正被别的高占用程序激烈争用时，推理本身变慢——那是真实资源不足，本方案不承诺解决。
-- 说明：每次推理都必然跑一遍前向传播（这是基线，不是问题来源）；MLX 首次还有一次性的图 / kernel 编译开销，由「启动预热」单独覆盖，与本问题无关。
+| 开关 | 运行行为 | 代价与边界 |
+|------|----------|------------|
+| `False` | 不调用`set_wired_limit`、`mlock`或其它常驻设置；允许macOS正常压缩、换出 | 用户接受长时间不用后首次转录可能要重新调页 |
+| `True`（默认） | package Runner对全部真实模型权重页执行`mlock`，持有至cleanup/进程退出 | 约2.46GB权重不可换出；极端内存压力下整体推理竞争变慢仍可能发生 |
 
-### 为什么不做「检测模型是否还热」
+启动预热独立于常驻开关，默认开启一次静音转录以支付首次kernel编译成本。没有定时保活推理，也不按瞬时内存压力猜测模型是否“热”。常驻承诺只覆盖模型权重；系统调度、GPU功耗恢复、临时张量和磁盘读取等其它开销不等于零。
 
-曾设想「录音开始发信号预热 + 判断是否热则跳过」。结论是**放弃检测**：系统内存管理是黑盒，RSS（混入临时张量，无法隔离权重）、瞬时内存压力（驱逐是粘性的、压力是瞬时的，会漏判）、粘性压力标志（仍漏 idle page-out）等任何"推断权重此刻在不在 RAM"的信号都是猜。改为下面的「直接钉住」，从源头消除换出，无需检测。
+### 旧结论复核与修正
 
-### 最终方案：不检测，直接「钉住」——`mx.set_wired_limit`
+- 7月6日只验证`set_wired_limit`调用成功及预算约2.96GB，不能据此认定实际权重永久驻留。
+- 9月前轮对照发现先设限再加载能看到约2.4GB wired增量，但仅调`_startup_initialize_runtime`内部顺序也太晚：Session构造已经加载并eval权重。
+- 本机MLX 0.31.2对应源码中，`ResidencySet::resize`会补入已有buffer，也会在降限时移出buffer；因此“不追溯”和“降低额度不会撤pin”不是通用机制。
+- 9月19日补验发现：提前设限、预热、收口并提交一次微型GPU运算后，系统wired从约3.04GB升至5.46GB，但空闲10秒又降至3.03GB。两阶段预算或一次GPU提交不足以满足长期不可换出的要求。该测量是本机现象，不宣称已定位所有Metal/驱动内部原因。
+- 旧文档“macOS不支持mlock”错误。Apple文档明确保证成功`mlock`的页保持物理驻留；本机无需sudo即可锁住MLX原始共享buffer。MLX buffer协议直接导出`a.data<void>()`，不需要复制模型。
 
-与其检测驱逐后补救，不如**从源头让权重不可被换出**。MLX 原生提供 `mlx.core.set_wired_limit(limit_bytes)`（**macOS 15.0+**；本机 Darwin 25 = macOS 26，满足）：
+### 实现与生命周期
 
-- 它告诉 Metal 驱动**允许把多少字节钉成 wired 内存** —— wired = 常驻物理 RAM，**永不被分页 / 压缩 / 换出**；返回旧值，默认 `0`（不钉）。
-- 补充事实：**macOS 不支持 `mlock`/`mlockall`**，POSIX 路线走不通；`set_wired_limit` 是 Metal 原生唯一正道。
+1. Runner创建Session并按开关预热后，计算锁页预算：`auto = min(active * 1.2, 总内存 * 0.6, recommended_working_set * 0.9)`。`wired_memory_limit`保留原字段名，支持auto/整数字节/`3g`等；现在表示实际权重锁页的上限，不再设置Metal额度。
+2. `mlx_qwen3_asr/wired_memory.py::LockedModelWeights`读取全部`model.parameters()`原始buffer；用字节视图兼容bfloat16，按系统页对齐、合并重叠/相邻范围，只锁权重、不锁临时KV/cache。
+3. 锁页对象保留buffer引用，保证原地址有效。完整权重超预算、非连续buffer或原生调用失败时回滚，拒绝仅锁部分权重。开启常驻但失败时引擎启动报错；接受换出时应显式关闭开关，不能静默降级为可换出模式。
+4. cleanup逐段munlock，重复调用安全；解锁失败保留范围和引用以便重试。finalizer兜底释放遗忘的锁，进程退出时系统回收锁页。
+5. server只透传意图并记录`method=mlock`、`locked_bytes`及预算；原生调用和页范围策略全部归package。关闭开关从新进程生效，不是运行期热切换。
 
-落地三件事（**wiring 与预热解耦**）：
+### 验证入口与验收边界
 
-| 做什么 | 时机 | 作用 | 是否受开关控制 |
-|--------|------|------|----------------|
-| ① 一次性启动预热（空跑一次静音推理） | 模型 load 之后 | 付清 MLX 惰性图 / Metal kernel 的**一次性编译**成本，让首次真实识别更快 | **否**，始终做（与"赖内存"无关） |
-| ② wire 住权重（`set_wired_limit`） | 预热之后 | 权重常驻物理内存，**根治换出导致的冷启动延迟** | **是**，server 可选项，默认开 |
+- 单测：`PYTHONPATH=mlx-qwen3-asr .venv/bin/python -m pytest mlx-qwen3-asr/tests/test_capswriter_runner.py mlx-qwen3-asr/tests/test_wired_memory.py -q`。
+- 真机：分别运行`.venv/bin/python tools/probe_qwen_residency.py --mode on --idle-seconds 1800`与`--mode off --idle-seconds 1800`。脚本独立加载当前模型，用固定语音比较空闲前后正文、权重地址和耗时；空闲期间只观察vm_stat，不唤醒GPU，也不人为制造极端内存压力。两模式应顺序运行以免互相争用。
+- 不能只读API成功或刚转录后的瞬时wired峰值；至少观察空闲跨越10秒后的持续增量，并在保留模型引用时解锁确认增量撤销。系统wired是全局指标，会受其它进程影响，应结合成功锁页的页数和地址不变证据判断。
+- 当前实际完成的观察时长与验收结果记录在`CLAUDE.md`，不能以几分钟实验声称数小时日常使用已验收。
 
-自适应定大小（不写死 GB）：
+参考：[Apple mlock手册](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mlock.2.html)、[MLX 0.31.2 buffer协议](https://github.com/ml-explore/mlx/blob/v0.31.2/python/src/buffer.h)、[MLX 0.31.2驻留集合](https://github.com/ml-explore/mlx/blob/v0.31.2/mlx/backend/metal/resident.cpp)。
 
-```python
-# 伪代码：预热后读取实际占用，再据系统上限保守钉住
-active = mx.get_active_memory()                              # ≈ 模型实际占用（1.7B-8bit ~2GB）
-cap    = mx.metal.device_info()["max_recommended_working_set_size"]
-wired  = min(int(active * 1.2), int(cap * 0.6))             # 贴合模型大小 + 余量，且远低于系统上限
-mx.set_wired_limit(wired)                                    # 仅 macOS 15+；hasattr + try/except 兜底，绝不致命
-```
 
-### 配置开关（server 可选项）
+## 十、客户端麦克风生命周期
 
-- **位置**：收敛在 MLX 引擎参数 `Qwen3ASRMLXArgs`（`config_server.py`），因为这是 **Metal 特性，其他后端没有**；通过 `EngineFactory` 透传进 `ASREngineConfig`。
-- **默认**：**开启**。
-- **语义**：仅控制第②步 wiring；关闭后权重恢复为可被系统正常换出的普通缓冲（启动预热仍照常做）。
-- **为什么必须可关（用户口径，2026-06-22 敲定）**：wired 内存不可换出，会**长期占住约 2GB+ 物理内存**。当用户要运行别的近乎占满内存的高占用软件时，我们不应"死赖在内存里"，须允许其释放这部分常驻占用。
+### 交互与边界（2026-09-18 用户确认）
 
-### 诚实的边界与风险
+- 保留短按切换大小写、长按 200ms 才开始占用麦克风、松手结束；本轮不通过提前开麦或缩短判定阈值换取速度。
+- 录音设备选择由 `config_client.py` 的 `macos_mic_device` 决定（2026-09-19 起）：`'default'`（发布默认，普适）跟随系统当前默认输入，每次开流前刷新设备表（本机实测约 0.6ms）——默认输入切换后旧设备仍可能正常打开却录错麦，这种静默错误不能仅依赖开流失败来刷新；`'builtin'` 优先内建麦克风，找不到时刷新设备表重找、仍无则回退默认输入。
+- 启动/停止必须配对；任务业务结束与底层句柄已释放是两个状态，不得仅凭 `recording=False` 或 `state.stream=None` 宣称关闭成功。
 
-1. `set_wired_limit` 是**上限 / 许可**，不是逐 buffer 的 pin；worker 内只此一个模型、额度又卡在模型大小附近，效果等价于"钉住这个模型"，这正是官方推荐用法。
-2. **wired 不可换出**，设太大（社区警告勿用默认的 ~75% RAM）会饿死系统甚至 kernel panic；故双保险卡在 `active*1.2` 与 `cap*0.6`，只锁模型那点。
-3. 只锁 ~2GB **远低于** `max_recommended_working_set_size`，**不需要 `sudo sysctl iogpu.wired_limit_mb`**，不动系统配置。
-4. **8GB 小内存机**：锁 2GB 占比偏高，更凸显"可关"的必要性。
-5. 仅 macOS 15.0+ 有该 API：低版本 / 非 macOS 走 `hasattr` + `try/except` 静默跳过，不致命。
+### 实现约束
 
-### 实施顺序与归属（为什么现在不写代码）
+1. 长按控制器在同一业务队列按顺序执行开始/结束，迟到的旧定时器以按压代号拒绝；退出或键盘接管失效时撤销未执行启动并结束在途录音。
+2. 任务在 begin、状态与消费者发布完毕前持续处于启动中；松手/取消登记后再收尾。每次录音使用独立队列，开始、音频、结束均由事件循环按投递顺序入队；迟到音频保留原队列，不污染下一条。
+3. macOS 采用 48kHz float32、20ms 块和 `latency='low'`；其它平台保持 50ms 与原默认延迟。实时回调只复制和投递，能量统计、日志和 trace 更新在普通事件循环执行，避免原生关闭等待被日志阻塞的回调。
+4. 设备表刷新策略随 `macos_mic_device`：`default` 模式每次开流前刷新（代价约 0.6ms，为正确性必需），`builtin` 模式快速路径复用已初始化设备列表、不再反复 terminate/dlopen；开流失败且旧资源已释放时最多刷新设备表后重试一次。刷新使用 terminate/initialize，不 dlclose 动态库。
+5. 关闭先请求回调主动退出，最多给 120ms 等待窗口，再在普通线程执行 `abort(ignore_errors=False)` 与 `close(ignore_errors=False)`。错误码不得静默忽略。正常关闭成功才释放资源归属；最长同步等待 1 秒，超时或错误保留故障流引用，禁止重开/重载。超时后原关闭若成功，下一次录音可继续。
+6. 原生 finished callback 只发信号；意外结束后的重开在回调之外执行，并用流代号拒绝过期恢复请求。不得从原生回调栈关闭或重建正在回调的流。
+7. 初始缓存跨过录音阈值时，缓存与当前音频块一并发送/保存，不能固定遗漏跨阈值的那一块。
 
-wiring + 启动预热属于**中层推理编排**，与「MLX 后端演进路线」决策一致——主路线是 **fork `mlx-qwen3-asr`、接管 `Session` 这层**（prompt / language / generation / chunking / aligner）。若现在改在适配层 `core/server/engines/qwen_asr_mlx/asr_engine.py`，待 fork 落成可编辑源码后会**重复搬迁**，并可能与后续调优改动打架。故定：
+PortAudio 对实时回调的阻塞/重入限制见 [官方回调说明](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)。具体采集启停语义见 [官方生命周期说明](https://portaudio.com/docs/v19-doxydocs/start_stop_abort.html)。
 
-1. **现在**：仅本文档记录决策（已完成）。
-2. **用户**：fork `mlx-qwen3-asr`，落成可编辑源码（editable install / vendored）。
-3. **之后**：在 fork 基础上实施 ①启动预热 ②wiring；server 配置开关（`Qwen3ASRMLXArgs`，默认开）+ README 配置入口同步落地。
+### 验证与恢复边界
 
-参考来源：
-[MLX `set_wired_limit` 文档](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_wired_limit.html)、
-[Metal — MLX 文档](https://ml-explore.github.io/mlx/build/html/python/metal.html)、
-[What 19 GB of Memory Compression Taught Me About MLX on M1 Max](https://dev.to/sleepyquant/what-19-gb-of-memory-compression-taught-me-about-mlx-on-m1-max-3eha)。
+- 隔离验证：`tools/test_stream_stop_leak.py` 覆盖严格关闭错误码、超时资源归属、单次重试、迟到音频、分块兼容与缓存完整性；`tools/test_mic_shortcut_lifecycle.py` 覆盖正常松手的启动空窗、幂等结束、取消、退出以及初始化异常。
+- 模拟测试不能证明 CoreAudio 偶发卡死已根治。Python 无法安全强杀卡在原生库里的线程；持续关闭失败仍需重启客户端释放进程资源。未来若要求此类故障完全自动恢复，需单独评估音频进程隔离及麦克风归属/权限成本。
+- 延迟日志拆分 `device_ms / construct_ms / start_ms / total_ms`，关闭记录 `callback_exit / abort / close` 阶段；不能只看旧版统一 `stream.close()` 超时文字推断真实卡点。

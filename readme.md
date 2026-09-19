@@ -67,7 +67,7 @@ bash install.sh
 | 1.7B-8bit（默认） | `mlx-community/Qwen3-ASR-1.7B-8bit` | ~1.8 GB | 日常使用 |
 | 1.7B-4bit（轻量） | `mlx-community/Qwen3-ASR-1.7B-4bit` | ~1.0 GB | 低内存 / 重度离电 |
 
-> **状态说明**：macOS 的 `qwen_asr_mlx`（MLX 后端，经 `mlx-qwen3-asr` 子仓库 Runner 流式喂音频）目前为**实验性**后端，仍在精度调优中；原版 Windows `qwen_asr`（GGUF）为稳定基线。遇到识别质量异常欢迎提 issue 反馈。
+> **状态说明**：macOS 的 `qwen_asr_mlx`（MLX 后端，经 `mlx-qwen3-asr` 子仓库 Runner 流式喂音频）已修复中英混说误转全英文、长句尾部丢失等已知精度问题，目前为默认后端并持续调优中。遇到识别质量异常欢迎提 issue 反馈。
 
 ```bash
 uv pip install --python .venv/bin/python huggingface_hub
@@ -178,13 +178,19 @@ capswriter uninstall # 取消自启
 1. **长按 Caps Lock** → 开始录音（保持按住）
 2. **松开** → 识别完成，写入剪贴板
 3. **粘贴** →软件客户端尝试将结果自动粘贴到光标位置一次，**推荐配合maccy等剪贴板历史管理工具使用本软件**，便捷找回转录历史。
-4. **短按 Caps Lock**（< 0.3 秒）→ 正常切换大小写，不触发录音
+4. **短按 Caps Lock**（< 0.2 秒）→ 正常切换大小写，不触发录音
 
 ### 菜单栏图标
 
 客户端运行时，菜单栏会常驻一个 CapsWriter 图标（矢量绘制，自动适配深 / 浅色菜单栏）。按住 **⌘ 拖动**可把它移到喜欢的位置，系统会记住，重启后保持不变；退出客户端时图标自动消失。
 
 点击菜单栏图标可查看当前状态，并执行复制最近结果、编辑热词、重启 CapsWriter、退出 CapsWriter 等操作。
+
+### 麦克风设备选择
+
+默认跟随「系统设置 › 声音 › 输入」里的当前默认设备，插拔耳机后自动跟随。如果你常戴耳机、希望始终使用 Mac 内建麦克风，把 `config_client.py` 里的 `macos_mic_device` 改为 `'builtin'` 后执行 `capswriter restart`。
+
+macOS 上空闲时不占用麦克风：长按达到 0.2 秒才开麦，松手即关闭。若极端情况下麦克风指示异常常亮，从菜单栏「重启 CapsWriter」即可恢复。
 
 ---
 
@@ -216,6 +222,10 @@ Qwen3-ASR   | 千问ASR
 
 基于音素模糊匹配，说出别名时自动替换为目标词。
 
+## 模型权重常驻
+
+`config_server.py` 中的 `enable_wired_memory`（默认开启）会把约 2.5 GB 模型权重锁定在物理内存中，避免长时间不用后第一次识别明显变慢。内存紧张、需要把内存让给其他大型软件时，把它改为 `False` 并执行 `capswriter restart`，即可允许系统正常换出权重。
+
 ## 修改配置
 
 核心配置在 `config_client.py` 和 `config_server.py`，修改后执行：
@@ -228,6 +238,7 @@ capswriter restart
 
 | 文档 | 路径 | 内容 |
 |------|------|------|
+| 更新日志 | `CHANGELOG.md` | 版本历史与用户可见变更记录 |
 | macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、推理后端演进等核心决策 |
 | Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
 | ASR 调优总文档 | `docs/ASR调优总文档.md` | 当前 ASR 调优口径、第一轮评测数据集组合方案和首要问题 |
@@ -239,7 +250,8 @@ capswriter restart
 | 项目 | 原版（Windows） | 本 fork（macOS） |
 |------|----------------|-----------------|
 | 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
-| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与 MLX wired memory 常驻额度 |
+| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与模型权重物理锁页（mlock）常驻 |
+| 自动语言转写 | 依后端实现 | Qwen MLX Runner 默认预置正文前缀以改善中英混说；显式指定语言时优先生效 |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |

@@ -29,6 +29,8 @@ from . import logger
 
 # macOS virtual keycode for F18 (kVK_F18 = 0x4F)
 _F18_KEYCODE = 0x4F
+# ANSI 键盘 M 的虚拟键码（kVK_ANSI_M = 0x2E）。
+_M_KEYCODE = 0x2E
 
 # CGEventField: kCGKeyboardEventKeycode = 9
 _kCGKeyboardEventKeycode = 9
@@ -54,6 +56,28 @@ _kCGEventSourceUserData = 42
 _PING_USERDATA = 0x43575F50     # "CW_P"
 
 
+def is_mark_problem_hotkey(
+    keycode: int,
+    flags: int,
+    control_mask: int,
+    option_mask: int,
+    command_mask: int,
+    shift_mask: int,
+) -> bool:
+    """纯函数精确判定 ⌃⌥M；Cmd 或 Shift 参与时不得误触发。
+
+    掩码作为参数传入，既避免纯函数依赖 Quartz，也便于离线契约测试使用任意位值。
+    Caps Lock / Fn 等无关状态位可以共存，但显式修饰键只能是 Control+Option，
+    防止吞掉前台应用已经定义的 ⌃⌥⇧M 或 ⌃⌥⌘M。
+    """
+    required = control_mask | option_mask
+    return (
+        keycode == 0x2E
+        and flags & required == required
+        and not flags & (command_mask | shift_mask)
+    )
+
+
 class MacOSF18Listener:
     """
     主动 CGEventTap 实现的 F18 监听器。
@@ -66,13 +90,16 @@ class MacOSF18Listener:
         self,
         on_down: Callable[[], None],
         on_up: Callable[[], None],
+        on_mark_problem: Callable[[], None] | None = None,
         on_tap_failed: Callable[[], None] | None = None,
     ) -> None:
         self._on_down = on_down
         self._on_up = on_up
+        self._on_mark_problem = on_mark_problem
         # CGEventTap 不可用（创建失败 / 运行时撤权 / RunLoop 退出）时的真故障回调
         self._on_tap_failed = on_tap_failed
         self._pressed = False
+        self._mark_pressed = False
         self._lock = threading.Lock()
         self._tap = None
         self._run_loop_source = None
@@ -137,6 +164,7 @@ class MacOSF18Listener:
         self._tap_should_be_enabled = False  # 主动停止，守护线程不再守护
         with self._lock:
             self._pressed = False
+            self._mark_pressed = False
 
         if self._tap is not None:
             Quartz.CGEventTapEnable(self._tap, False)
@@ -219,6 +247,8 @@ class MacOSF18Listener:
                     self._on_down()
                 elif item == 'up':
                     self._on_up()
+                elif item == 'mark' and self._on_mark_problem is not None:
+                    self._on_mark_problem()
             except Exception as e:
                 logger.warning("[f18-listener] 业务回调异常: %s", e)
 
@@ -274,6 +304,30 @@ class MacOSF18Listener:
         self._last_event_ts = time.monotonic()
 
         keycode = Quartz.CGEventGetIntegerValueField(event, _kCGKeyboardEventKeycode)
+        if keycode == _M_KEYCODE:
+            if event_type == Quartz.kCGEventKeyDown:
+                flags = int(Quartz.CGEventGetFlags(event))
+                if is_mark_problem_hotkey(
+                    keycode,
+                    flags,
+                    int(Quartz.kCGEventFlagMaskControl),
+                    int(Quartz.kCGEventFlagMaskAlternate),
+                    int(Quartz.kCGEventFlagMaskCommand),
+                    int(Quartz.kCGEventFlagMaskShift),
+                ):
+                    with self._lock:
+                        if self._mark_pressed:
+                            return None
+                        self._mark_pressed = True
+                    # 和 F18 业务一样只入队；标注写盘绝不能阻塞 CGEventTap。
+                    self._event_queue.put('mark')
+                    return None
+            elif event_type == Quartz.kCGEventKeyUp:
+                # 即使用户先松开修饰键，M keyUp 仍必须按 down 时的状态吞掉。
+                with self._lock:
+                    if self._mark_pressed:
+                        self._mark_pressed = False
+                        return None
         if keycode != _F18_KEYCODE:
             return event  # 非 F18，透传
 

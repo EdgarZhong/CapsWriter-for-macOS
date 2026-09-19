@@ -112,6 +112,40 @@ class CapsWriterClient:
             self.remap_session = MacOSCapsRemapSession()
             self.macos_caps_bridge = MacOSCapsF18Bridge(self)
 
+        # 编辑框标注功能（macOS）：标注服务 + 「标记上一条有问题」全局热键。
+        # 非 macOS 下 annotation 仍创建（纯文件写入，无害），热键仅 Darwin 注册。
+        # remap_f18 使用可吞键的 CGEventTap；其它 macOS 配置才回退 pynput。
+        # mark_last_problem 内部自带锁与异常兜底，注册失败不阻断菜单入口。
+        from core.client.output.annotation_store import AnnotationService
+        self.annotation = AnnotationService(self)
+        if system() == 'Darwin' and self.macos_caps_bridge is None:
+            try:
+                from core.client.global_hotkey import get_global_hotkey_manager
+                _hm = get_global_hotkey_manager()
+                _hm.register(
+                    Config.mark_problem_hotkey,
+                    self.annotation.mark_last_problem,
+                )
+                _hm.start()
+                logger.info(f"已注册「标记上一条」全局热键: {Config.mark_problem_hotkey}")
+            except Exception as e:
+                logger.warning(f"注册标记热键失败（功能仍可从菜单栏使用）: {e}")
+        elif system() == 'Darwin':
+            # remap_f18 模式复用 active CGEventTap：它能条件吞掉 ⌃⌥M，避免 pynput
+            # 只监听不拦截而向前台应用透传、触发系统错误音或特殊字符。
+            logger.info("「标记上一条」热键由 macOS CGEventTap 接管并抑制透传")
+
+        # 编辑框模式运行时开关持久化：菜单切换写入 ~/.capswriter/state/editor-mode.json，
+        # 启动时读回覆盖默认值，保证用户选择跨重启生效
+        if system() == 'Darwin':
+            try:
+                import json as _json
+                _p = Path.home() / '.capswriter' / 'state' / 'editor-mode.json'
+                if _p.exists():
+                    Config.editor_mode = bool(_json.loads(_p.read_text()).get('enabled', True))
+            except Exception as e:
+                logger.debug(f"读取编辑框模式持久化失败（忽略，用默认值）: {e}")
+
         # 内存清理
         empty_current_working_set()
 

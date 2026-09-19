@@ -72,6 +72,12 @@ class ClientState:
     
     # 最近一次输出内容（如果是 LLM 润色，则是润色结果；否则是原始识别结果）
     last_output_text: Optional[str] = None
+
+    # 按下 Caps 时刻记录的前台应用（编辑框确认后恢复焦点并上屏的目标）
+    paste_target: Optional[Dict[str, Any]] = None
+
+    # 最近一条完成的识别案例（供「标记上一条有问题」与编辑框标注共用）
+    editor_last_case: Optional[Dict[str, Any]] = None
     
 
     
@@ -110,6 +116,8 @@ class ClientState:
         self.trace_contexts.clear()
         self.task_trace_map.clear()
         self.first_audio_logged_trace_ids.clear()
+        self.paste_target = None
+        self.editor_last_case = None
         
         logger.debug("客户端状态重置完成")
     
@@ -118,6 +126,7 @@ class ClientState:
         start_time: float,
         trace_id: Optional[str] = None,
         shortcut_key: Optional[str] = None,
+        paste_target: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         开始录音
@@ -126,6 +135,7 @@ class ClientState:
             start_time: 录音开始的时间戳
             trace_id: 本次按键驱动链路的追踪标识
             shortcut_key: 触发本次录音的快捷键名
+            paste_target: 本轮录音开始时捕获的上屏目标快照
         """
         self.recording = True
         self.recording_start_time = start_time
@@ -139,6 +149,9 @@ class ClientState:
             self.trace_contexts[trace_id] = {
                 'trace_id': trace_id,
                 'shortcut_key': shortcut_key,
+                # 每条在途录音必须持有自己的目标副本，不能在结果返回时再读取可能
+                # 已被下一条录音覆盖的全局 paste_target。
+                'paste_target': dict(paste_target) if paste_target else None,
                 'recording_start_time': start_time,
                 'finish_requested_time': None,
                 'cancel_requested_time': None,
@@ -358,4 +371,3 @@ class ClientState:
             text: 输出文本内容
         """
         self.last_output_text = text
-
