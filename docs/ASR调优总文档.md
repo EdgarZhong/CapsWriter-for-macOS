@@ -1,5 +1,310 @@
 # ASR 调优总文档
 
+## 重启后单句高延迟与连续录音乱序（2026-09-19）
+
+### 根因与实际链路证据
+
+本次故障不需要后台文件转录、不需要历史任务、不需要连续录制：**一条录音内部的音频包就会积压**。客户端麦克风优化将macOS采集块从50ms改为20ms，每秒50包；`AudioRecorder`逐块发送，`ws_recv`把每个包提交为一个Worker工作单元。服务端既有`WorkHandler.drain_queue()`在缓冲非空时仍以20ms超时等下一包，持续到包可使收包循环迟迟不返回；松手后每处理一块还会再等20ms，10秒录音约500包，仅这部分等待即可接近10秒。原50ms间隔有足够空隙使循环及时返回，20ms间隔触发了这个隐藏的节拍问题。
+
+另外，旧`WorkBuffer.pop()`通过`next(reversed(...))`优先最新task，与模块声称的同socket FIFO不符。旧句尚未消费完时新句插队，放大等待并让返回顺序颠倒。这是连续录制的额外故障，不是单句高延迟的必要条件。
+
+以下来自9月19日已发生故障的`logs/server_latest.log`，未要求用户重新录音。final处理区间是Runner入口日志至完成日志，包含最终推理与该段适配处理，不是GPU独占耗时：
+
+| 任务短ID | 录音时长 | final提交 | final开始处理 | 结果完成 | final排队 | final处理 |
+|---|---:|---|---|---|---:|---:|
+| `52d4e04e` | 5.70s | 09:42:13.378 | 09:42:33.173 | 09:42:33.633 | 19.795s | 0.460s |
+| `58aebba2`（后录先返回） | 6.88s | 09:42:24.372 | 09:42:30.979 | 09:42:31.906 | 6.607s | 0.927s |
+| `65cb36da` | 10.78s | 09:42:50.258 | 09:44:29.685 | 09:44:30.418 | 99.427s | 0.733s |
+| `d1994ef6` | 6.52s | 09:45:46.866 | 09:45:53.082 | 09:45:53.708 | 6.216s | 0.626s |
+
+最后一条客户端松手为09:45:46.673，客户端收到结果为09:45:53.710：松手至提交约0.193秒，服务端完成至客户端收到约0.002秒。主要异常发生在Worker调度，而不是网络传输、编辑框或语言前缀/尾块补齐的最终推理区间。最近服务端精度修复保留；不能将历史适配器直调用验收当成完整Worker调度验证。
+
+### Runner重构与“30秒提前推理”的历史核查
+
+本案“旧代码”指9月19日09:36重启后仍在运行的、本轮调度修复前代码，不是回退到最初版本。实际调用链有三层，不能把收包、缓存与模型推理混称为处理：
+
+| 阶段 | 进入Worker的单位 | 何时调用模型 |
+|---|---|---|
+| 7月6日`76250e2`重构之前 | 外层攒好的语义片段；短句通常一个工作单元 | 收满外层阈值或收到final；当时客户端配置60s段长、4s重叠，阈值68s；Session内部另做≤30s切分 |
+| Runner重构后、麦克风优化之前 | 每个50ms音频包进入Worker，由Runner缓存 | Runner收到final才调用Session，之后内部按≤30s分块识别 |
+| 本次麦克风优化后 | 每个20ms音频包进入Worker | 推理触发条件未变，但到包间隔撞上既有20ms收包等待，先造成大量排队延迟 |
+
+源码依据：子仓库`25551b0`与当前`QwenASRRunner.feed_audio`都在非final时直接返回None，只有final进入`_finalize_task`→`Session.transcribe`。当前`transcribe.py`中`split_audio_into_chunks`是此调用之后的离线切分，不是录音到第30秒时的提前推理。主仓库`76250e2`当时的CLAUDE看板也明确“尚未实现录音过程中提前处理稳定InferenceChunk”。用户本轮提出了该能力预期与实现的差距，后续需单独收敛实施；本轮修复调度并不等于已补齐提前推理。
+
+重构将工作单元从大段变为传输小包，却没有同步调整调度等待策略，是潜在缺陷的来源；近期50ms→20ms修改使它稳定暴露。前一版短句只承担一次约20ms等包，自然不会产生“500个包各等20ms”的十秒级额外延迟。即使保持final才推理，移除逐包等待也足以消除本案已经证实的额外等待机制。
+
+### 修复与验证入口
+
+- Worker有积压时用`get_nowait()`，仅完全空闲才阻塞等待；每轮最多读取64项，包括失效连接的包，避免持续输入饿死处理。
+- 缓冲按socket分组，内部FIFO保留连续录音及其final顺序，不同socket逐工作单元轮转。长文件最终推理本身仍是同步执行，不承诺推理期间可抢占。
+- 只有真正清除断连session后才扫描包缓冲，正常逐包处理不反复复制整个积压队列。
+- Runner最终日志新增`final排队`与`final处理`，原`耗时`仍为final提交至完成，避免把总延迟误称模型纯推理耗时。
+- 无模型调度回归：`.venv/bin/python tools/test_worker_scheduling.py -v`。10项覆盖单条20ms录音、积压逐包等待、连续输入让出处理、同连接录音顺序、跨连接轮转、空闲维护、断连与退出。最初9项在旧代码6项失败；新增单句定时用例在备份旧代码首包延迟10040ms而失败，修复后10项全部通过。
+- 麦克风生命周期及数据完整性22项、编辑框结果流与UI契约通过。未新增真实模型复现实验、未重启日常服务；代码验证不等于已验证重启后日常实际延迟。
+
+## 历史范围：同一音频的服务端吞尾差异（2026-09-18）
+
+用户明确纠偏：本轮Mac/Windows同一份既有音频只跑服务端，客户端不在比较路径内。此前采集收尾风险仅是独立旧问题，不能用于解释本次分歧。本轮优先核对声学特征、编码器尾帧长度与补齐、解码EOS决策；保留语言前缀修复。
+
+## 第五轮：定位两处服务端编码器差异（2026-09-18）
+
+### 已证实的卷积尾块错误，已修代码
+
+Windows `inference/encoder.py::_run_frontend` 把不足100帧的最后一块Mel补零到100帧，再经三层stride=2卷积，最后裁回有效长度。Qwen官方 `modeling_qwen3_asr.py:694` 同样先对本条的chunk执行 `pad_sequence` 再卷积，以mask移除无效输出；不足一整块的单条输入只使用自身长度。
+
+MLX `encoder.py::_encode_single` 原来将不足100帧的尾块直接卷积，声称“no extra right-padding”保留等价语义。这在真实非零偏置的多层卷积/GELU下不成立：补齐位置经过前层会产生激活，参与后层最后一个有效token的计算；直接结束短块则把相关中间位置当成边界零值。部分尾长没有差异，部分尾长改变最后一个有效token，随后经注意力传播，影响是否输出尾字。这不是少裁了输出token，也不是客户端丢音频。
+
+- 独立诊断只切换“Mel尾块补齐→卷积→裁回原有效帧数”，不追加PCM静音、不改变prompt/音频token数/生成预算/温度。
+- 20条尾缀候选中4条恢复Windows尾字：`20260822-230445` 回应→回应呢；`20260823-005919` 反斜→反斜杠；`20260910-212648` 告诉→告诉我；`20260912-135455` 毕不了→毕不了业。12条语言异常/正常对照均无实质变化。
+- 旧语言前缀与新正文前缀分别运行32条/64次，均是相同4条恢复，三条全英文异常在新正文前缀下保持修复效果。
+- 修复落在 `mlx-qwen3-asr/mlx_qwen3_asr/encoder.py`：有完整块时尾块补到chunk_size，卷积后裁回ceil(tail_frames/8)；不足一整块保持Qwen行为。未增加有效时长。
+- 原测试只与旧MLX逐块循环比较，未校验官方补齐语义，且小模型bias默认0掩盖差异。现基准改为官方pad_sequence语义，设确定非零bias，覆盖37/100/101/107/108/137/199/200/337帧。旧实现3项失败；修复后模型/音频/Runner/Session/提示词/分段/流式等267项测试通过。
+- 历史：上游 `497eaa4`（2026-02-16）优化时保留了更早的无补齐尾块，早于CapsWriter Runner重构；不能归为用户7月重构新引入。
+
+### 已实测影响的8秒注意力策略差异，尚未改默认
+
+模型配置及实际解析均为 `n_window=50`、`n_window_infer=800`，对应每8秒/104个音频token一个声学注意力窗口。MLX用block-diagonal mask隔开；Windows ONNX `Qwen3ASRBackendOnnx` 对全部有效token做全局注意力（DML额外补齐仅屏蔽无效token）。这次MLX窗口配置读取正确，符合Qwen原配置；Windows集成采取了不同策略。
+
+仅把MLX窗口mask设为None，不改原PCM、prompt、权重或token数：20条尾缀候选中9条归一化正文与Windows对齐，均超过8秒；包括8.1秒的反斜杠、8.2秒的管你/冲突啊、8.7秒的爱意、8.8秒的别想了。短尾窗口只能在声学编码阶段看到最后少量音频，无法从前窗口获取上下文；文本解码器仍能看到全部编码token，不能说整个模型“只听了最后一点”。此组与卷积组重叠1条，两个单变量分别解释12个不同候选，不能声称组合后必然改善12条。
+
+这属于有证据的调优方向，不能把“与Windows不同”直接等同于违反Qwen原实现。尚未将全局注意力设为生产默认，需在卷积修复+正文前缀基础上验证交互、正常长录音与内存/延迟。
+
+### 其它隔离结果与证据
+
+| 单变量 | 32条中的正文影响 | 对本案的意义 |
+|---|---|---|
+| Windows NumPy Mel取代MLX Mel | 0条实质变化 | 两者最大元素差约0.00817，但本批未改变正文，不支持它是这批吞尾主因 |
+| Windows完整prompt模板 | 3条尾缀候选变化，另3条语言异常及1条英文术语变化 | 提示词也影响末字；其中“正常参加吗”不等于Windows“正常参加”，不能一概视为正确修复 |
+| Windows式全局声学注意力 | 9条尾缀与Windows对齐；另1条语言异常恢复 | 与8秒末端窗口高度对应，有明确单变量因果证据 |
+
+复现脚本：`tools/asr_tail_boundary_probe.py`（无参数为卷积隔离，`--text-only`叠加正文前缀，`--secondary`分别检查Mel/prompt/注意力）。记录依次位于 `diagnogs/tail_boundary/20260918-155332/`、`20260918-155453/`、`20260918-155553/`；汇总 `comparison_summary.json`。三批共256次生成全部EOS。旧前缀两批基线64/64复现原Mac输出，新前缀32条基线与第四轮新结果完全一致。官方源码固定在Qwen `7c6daf7`，快照保存于 `diagnogs/default_comparison/20260918/QwenLM/Qwen3-ASR/qwen_asr/core/transformers_backend/modeling_qwen3_asr.py`。
+
+正式代码验收：`diagnogs/tail_boundary/production-fixed/`，通过正式服务端适配器分包跑33条（32条原样本+31.2秒长录音）、两种语言入口，共66次，全部EOS。其中32条×2入口的原始生成token、prompt及格式化正文64/64与诊断尾块修正一致。长录音新正文模式完全不变，旧语言模式仅标点改变。当前两个修复叠加后，20条候选有6条与Windows归一化对齐（语言前缀2条+卷积4条），不代表其余14条都已经排除问题。语法检查、主/子仓库diff检查通过。
+
+本轮不再以采集缺音解释同一既有音频的服务端差异；已找到可复现的具体实现错误和策略差异，但不声称20条全部归因完毕，也未把Windows文本当人工真值。日常服务未重启。
+
+## 当前范围（2026-09-18）
+
+用户已授权修改代码，要求至少完成一项已知问题后停下汇报；由主 Agent 直接完成，不使用子 Agent、不另写 plan。本轮先修复中英混说变全英文。尚无证据证明 Runner 重构导致普遍精度下降，也不能以 Windows 输出作为人工真值。下方前三轮“不改生产”“不新增实验”等限制仅描述当轮历史边界。
+
+## 第四轮：自动语言正文前缀修复（2026-09-18）
+
+### 实现与兼容边界
+
+- `mlx-qwen3-asr/mlx_qwen3_asr/capswriter_runner.py`：集中配置新增 `auto_language_text_only=True`，CapsWriter 默认启用；设为 False 可恢复原自动语言入口。
+- `session.py`：同步/异步调用按任务透传，裸 Session 默认仍为 False；不修改共享 tokenizer 状态。
+- `tokenizer.py`：仅在未指定语言时预置 `<asr_text>`，保留 system/context、音频占位及聊天消息边界；显式语言优先且只追加一次分隔符。
+- `transcribe.py`：所有内部 chunk 使用同一策略；请求时间戳或说话人对齐时保留语言识别入口，避免 unknown 导致 aligner 跳过。正文模式按相邻字符边界拼接，避免中文多空格、英文词黏连。
+- 正文模式的 `language` 为 `unknown`，不把语言猜测包装成识别结果；CapsWriter 当前客户端正文输出不依赖该标签。未更改温度、token 预算、模型权重、音频内容或切段算法。
+- 吞尾尚未修复：150ms 补静音在上一轮存在「风险/风格」歧义，本轮不启用，也不将另一个旧录音阈值漏包缺陷混称为吞尾根因。
+
+### 验收证据
+
+- 新增 `mlx-qwen3-asr/tests/test_capswriter_text_only.py`；先确认10项调用链测试在旧实现失败、6项拼接测试在缺少对应实现时失败，再验证通过。Runner、Session、tokenizer、transcribe、chunking、streaming 定向测试合计175项通过。
+- 正式适配器回归命令：`.venv/bin/python tools/asr_symptom_probe.py --infer --production-regression`。以4096采样点分包，经 `QwenASRMLXEngine.feed_audio_patch` → Runner → Session 运行；只追踪生成器，不用诊断正文前缀覆盖正式实现。
+- 记录：`diagnogs/symptom_probe/20260918-151509/` 的 `results.jsonl`、`runtime.json`、`acceptance.json`、`silence.json`。32条录音 × 旧入口/新默认，共64次生成；旧入口32/32复现保存的Mac基线，新入口32/32与前轮正文前缀诊断输出完全一致，全部EOS。同条PCM与生成配置不变，prompt仅增加token 151704。
+- 三条全英文异常全部恢复中文+英文术语。9条正常对照中8条无实质变化；英文术语样本 `20260819-091506` 从 `Versailles reacts. Best practice.` 变为 `Versal Reacts Best Practice.`，缺人工真值，不宣称改进或退步。
+- 20条尾缀候选仅2条正文改变，均延长尾缀；不能因此宣称吞尾问题已解决。0.1/1/3秒静音在两种入口下共6次生成全部为空，均EOS。
+- 追加实际长录音 `20260830-003139`（31.2秒）：正式适配器下两种入口均产生2个内部chunk、全部EOS，最终格式化正文完全一致；记录在 `diagnogs/symptom_probe/20260918-151509-long/`。语法检查和主/子仓库 `git diff --check` 均通过。
+- 真实验证覆盖已知样本和有限对照，不代表全9313条准确率，也未覆盖充分的纯英文长句/多语言质量。尚未重启日常服务，现有服务进程未加载本次修改。
+
+## 第三轮：语言前缀与尾部边界定向验证（2026-09-18）
+
+用户在第二轮建议后授权按助手思路继续。此轮只在独立进程通过现有Runner运行定向验证，没有修改生产推理实现、模型参数、原录音或原转录，也没有重启日常服务。第一/二轮关于不新增实验的边界作为当时阶段记录保留。
+
+### 方法与证据
+
+新增诊断入口 `tools/asr_symptom_probe.py`，默认仅生成清单，`--infer`才加载模型；每次输出目录必须不存在。总共32条独立录音：3条全英文异常、中文/英文术语/正常混说各3条对照、20条Mac严格少尾缀候选。纯英文长句对照不足，采用3条至少15个拉丁字母的英文术语；这不代表长英文场景的验证。
+
+- 语言对照：12条 × auto/Chinese/仅正文前缀三路，加20条吞尾原始基线，共56次生成，输出 `diagnogs/symptom_probe/20260918-101038/`。
+- 吞尾跟进：20条 × auto/仅正文前缀/末端补150ms静音，共60次生成，输出 `diagnogs/symptom_probe/20260918-101222/`。
+- 补静音副作用对照：原12条语言样本 × auto/补150ms静音，共24次生成，输出 `diagnogs/symptom_probe/20260918-101358/`。
+
+全部140次生成完成且为EOS；全部64次基线（包含重复基线）与已保存Mac格式化输出一致。temperature固定0、模型实际198个量化模块均为8bit。同条音频各变体预算固定为原始时长对应值；追加150ms静音不会额外增加预算，所有样本始终小于30秒，不引入切分。检查prompt token：仅正文前缀等于原auto prompt追加151704；Chinese使用原生强制语言；补静音仅改变音频占位数量，不改聊天文本。保存原PCM散列、原始生成token、raw decode、实际配置、language、逐段预算及结束原因。
+
+### 语言异常：前缀干预对3条全部生效
+
+| 样本 | auto | 指定Chinese / 仅正文前缀（两者本例正文相同） |
+|---|---|---|
+| 20260908-233752 | 后半句全部生成英文 | `Action, schedule, occurrence，这些还有没有有用的元信息？我不是让你去掉元信息，而是精简，并且去重。` |
+| 20260911-114212 | `Codex, we're still doing this thing. Directly use subagent.` | `Codex，我们还正在干这件事情，直接用Subagent。` |
+| 20260912-110033 | `Mailbox ownership. This is what things are.` | `Mailbox ownership，这都是什么东西啊？` |
+
+这支持“自动语言生成前缀是这3条全英文现象的关键可干预因素”，而不是仅由跨后端关联猜测。但未复原历史依赖，仍不能叫作Runner重构回归；同环境旧Session也能复现auto异常。
+
+正常对照：两种前缀对3条纯中文、3条混说均无格式归一化后的正文变化；3条英文术语中1条发生词形变化：auto为 `Versailles reacts. Best practice.`，Chinese为 `Versal React Best Practice。`，仅正文前缀为 `Versal Reacts Best Practice.`。尚未听音确认哪个更正确，不能把变化直接算改善或退步。另两条英文术语仅有格式差异或不变。
+
+两种方案的区别：指定Chinese仍输出language=Chinese（由强制配置决定，并不证明音频全为中文）；仅正文前缀不生成语言头，当前解析返回unknown。后者没有强制中文，但会失去模型原生自动语言元数据。补150ms静音对3条全英文异常完全无效，不能用尾部补静音替代语言策略。
+
+### 吞尾候选：排除本组预算耗尽，发现声学边界敏感性
+
+20条原始基线全部EOS，生成8–50 token，预算128–344；这组既未撞length，也未触发repetition，因此增加max_new_tokens不是它们的针对性修复。
+
+| 干预（原预算固定） | 20条中正文变化 | 严格增加尾缀 | 格式归一化后与Windows一致 |
+|---|---:|---:|---:|
+| 仅正文前缀 | 2 | 2 | 2 |
+| 末端补150ms静音 | 11 | 11 | 10 |
+
+补静音后可观察到「正常参→正常参加」「告诉→告诉我」「补充文→补充文档」「毕不了→毕不了业」等末尾补全。12条语言样本的补静音对照（3异常+9正常）文本全部原样，格式归一化前也一致。
+
+关键歧义例 `20260814-190645`：原Mac为「会不会改出新的风」，仅正文前缀输出「风格」，补静音输出「风险」，Windows为「风格」。不能把与Windows更一致当作正确真值。11条变化说明解码对尾部声学边界敏感，不能证明所有新增末字在原音频中存在，也不能证明麦克风松键前没有实际漏采。补零不会恢复真实丢失的音素。
+
+### 当前建议与尚未完成
+
+1. 将“仅正文前缀”和“尾部补静音”保留为两个独立候选，不同时切换；前者优先针对混合语言变全英文，后者针对完整音频EOS漏尾。当前未上线任何一个。
+2. 在独立诊断入口继续验证比全局强制Chinese更可控；若后续接入产品，应在package集中管理并保留原auto路径，明确仅正文模式的language=unknown，而不伪造自动语言判断。
+3. 吞尾下一步最缺的是原音频听辨，而非扩大token上限或提高temperature：先核对上述「风险/风格」及文档/毕业等末字，区分可听到真实尾音与模型补全。真实松键漏采仍需要ADC时间、最终采样点、final先后关系留痕，本轮未在日常客户端安装这种采集诊断。
+4. 现有样本不足以证明全局收益，尤其缺正常长英文、纯静音、跨语言类别对照。单点150ms只表明这一取值有作用，尚未比较其他长度或确定最优值；不启动无边界参数扫描。
+
+复现命令（每次自动新建输出目录；需要本机MLX环境）：
+
+```bash
+.venv/bin/python tools/asr_symptom_probe.py --infer
+.venv/bin/python tools/asr_symptom_probe.py --infer --tail-followup
+.venv/bin/python tools/asr_symptom_probe.py --infer --padding-controls
+```
+
+验证：脚本语法检查、140次运行记录完整性、基线一致性、预算/温度/前缀与输入样本数约束检查通过。此处验证的是实验执行及可重复输出，不是人工真值上的准确率提升。
+
+## 第二轮：三条链路默认值对照与建议（2026-09-18）
+
+用户最新范围：除重构回归外，同时比较参数与上游默认，提出后续排查及调优建议。仍不预设整体精度下降。本轮只读取源码、核对已有记录及保存官方代码快照；没有修改生产实现、切换模型、重启服务或进行新的模型推理。
+
+### 固定版本与核验依据
+
+- 当前 Runner：子仓库 `25551b0`，基于 `f069a0f`（v0.3.5）。Session、transcribe、generate、tokenizer、audio、chunking 六文件相对基线字节完全一致。
+- [官方 Windows CapsWriter](https://github.com/HaujetZhao/CapsWriter-Offline/tree/84912d5218ee5e51e216c54dc15a1cb0f466eb76)：`84912d5`（2026-09-14）。其 Qwen GGUF 适配器、inference/asr.py、encoder.py、llama.py 四文件与本机副本字节完全一致。官方 config 默认 language=auto、context为空、60s/4s 分段也已核验；用户 Custom 当次运行配置未取得，但用户已确认没有改底层推理。
+- [MLX 当前上游](https://github.com/moona3k/mlx-qwen3-asr/tree/1e28932dac8e2c68b34c29f32e2be338ffc1c852)：`1e28932`（2026-09-07）。移除函数文档串后 AST 对比：build_prompt_tokens、resolve_max_new_tokens、_detect_repetition、split_audio_into_chunks、log_mel_spectrogram 与本地相同。不能把上游其它性能/线程修复等同于已修复本案精度问题。
+- [Qwen 模型团队参考实现](https://github.com/QwenLM/Qwen3-ASR/blob/7c6daf77a2421100f5fb066495372c00129d39ff/qwen_asr/inference/qwen3_asr.py)：`7c6daf7`。用于区分模型原生语义与 Windows 集成默认，不混称两个“官方”。
+- 原始快照、版本和散列核验：`diagnogs/default_comparison/20260918/{versions,source_manifest,verified_comparison}.json` 及同目录源码。验证包含 15 项相等检查，全部通过。
+
+### 实際生效的默认值
+
+| 项目 | CapsWriter 当前 MLX Runner | fork 基线 MLX v0.3.5（当前上游相关默认也相同） | 官方 Windows GGUF |
+|---|---|---|---|
+| 产品语言选择 | auto → None | Session language=None | auto → None |
+| 自动语言 assistant 前缀 | 空，让模型生成语言与分隔符 | 相同 | 预置 `<asr_text>`，直接生成正文 |
+| 指定 Chinese | 前缀 `language Chinese<asr_text>` | 相同 | 前缀相同，但其余聊天模板仍不同 |
+| 空 context 的 system 内容 | 空 | 空 | `You are a helpful assistant.` |
+| 聊天边界 | im_end 后有换行 | 相同 | 手工拼装，省去这两处换行 |
+| temperature | 0（greedy） | 0 | 0.4 |
+| top_k / 随机种子 | greedy 无随机采样 | 相同 | top_k=50，每次随机 seed；top_p=1、min_p=0、惩罚系数默认不生效 |
+| max_new_tokens | None → ceil(chunk秒数×12)+32，限制128–512 | 相同；底层 GenerationConfig 的4096不是 Session 实际预算 | 每次解码循环最多512 |
+| 重复保护 | 重复 token/短模式检测后直接停止，无自动重试 | 相同 | 最近15个稳定token的种类≤3时熔断，最多4次尝试，每次加温0.3 |
+| 内部切分 | ≤30s 原样；更长按低能量点递归切分 | 相同 | CapsWriter 外层到68s阈值后按60s步长、4s重叠；适配器上限80s |
+| patch处理 | 16k mono float32逐包缓存，final拼接 | 接收整段数组 | 外层缓存后交模型 |
+| 元数据 | return_chunks=True；timestamps=False | return_chunks=False；timestamps=False | 无同等生成结束元数据 contract |
+| 预热/内存 | 新增启动静音预热与wired资源预算 | Session本身无同等Runner资源编排 | 编码器自身有预热；与文本策略分开 |
+
+`transcribe.py:694` 显式构造 temperature=0 的 GenerationConfig；RunnerConfig 和 Session.transcribe 均不暴露 temperature。因此只修改模型目录 generation_config.json、或给 CapsWriter server 配置随手添加 temperature，并不能改变当前 MLX 这条实际调用链。若后续试验，需要在 package 内明确接通参数，不散落外层。
+
+Windows 的0.4是 CapsWriter GGUF 集成选择，不代表 Qwen 模型团队推荐的统一最优值。Qwen 参考实现的 vLLM 构造默认 temperature=0.0，其提示词也采用空 system、auto时让模型生成语言信息，与 MLX 更接近。不能把“对齐Windows”直接叫作“恢复Qwen官方默认”。
+
+音频特征方面：两端都为16k、128 mel、400点FFT、160步长、Hann窗、reflect边界、Slaney滤波及相近log压缩；没有发现Runner新增降噪/归一化或重复重采样。但计算实现并非数值一致：GGUF用NumPy/ONNX，MLX用MLX；GGUF先全帧max裁幅再裁最后帧，MLX先裁最后帧再max裁幅，若被裁掉的末帧是最大能量点可产生差异。这是底层差异候选，未验证影响大小，优先级低于提示词；两端都丢弃末端额外STFT帧，不能仅见 `[:, :-1]` 就判定吞音频。
+
+### 两个症状的进一步结论
+
+**混合语言变全英文**：3条明确样本均由模型生成 `language English<asr_text>` 和英文正文；同环境旧Session与Runner一致。优先候选是自动语言生成与文本解码的相互影响，而不是结果处理翻译，原因仍待单变量验证。Qwen官方仓库的[Discussion #27](https://github.com/QwenLM/Qwen3-ASR/discussions/27)有用户在原生PyTorch 1.7B、language=None下输入拼接的中英音频却只得到英文的报告；该报告无维护者回复，且是遗漏中文的类似现象，并非本案翻译机制已获官方确认。
+
+**吞尾**：应独立区分三种服务端停止原因和采集丢失。
+
+1. `eos`：模型自行结束。增加允许生成长度不会强迫它越过EOS；需检查原音频是否已缺尾，或完整尾音下模型仍未转写。
+2. `length`：预算耗尽；这是扩大max_new_tokens直接针对的情形。
+3. `repetition`：重复保护提前停止，MLX的truncated仍为False。只看truncated=False不足以排除它。Windows这里会重试，MLX直接返回，属于可调策略差异，但已有40条记录均明确为EOS，不能据此认定本案被重复检测切断；它们也不是对所有吞尾候选的专项覆盖。
+4. 采集边界：官方Windows同样有recording=false拒收callback、发送create_task不显式汇合，开头阈值缓存漏当前块的旧缺陷也仍存在。Mac增加按需关流，但“回调门控”并非Mac独有或Runner引入。应按采集时间确认松键前的样本是否到达保存/发送/Runner各边界，而不是猜测固定延时能解决。
+
+新定位的可观测性缺口：`QwenMLXRunnerPipeline.process` 只把text/duration等拷入Result，language、chunks、每chunk generated_tokens/max_new_tokens未随结果存档；仅日志写了总体finish_reason/truncated；RecognitionMessage也无对应字段。不是精度根因，却导致现有批跑Markdown无法直接回答全部吞尾案例的结束原因。客户端回调忽略time_info.inputBufferAdcTime，仅保存入队墙钟时间，同样不足以判断松键前物理样本是否完整。
+
+### 推荐的下一步（方案，尚未实施）
+
+| 优先级 | 排查/调优动作 | 控制变量与验收 | 结果意味着什么 |
+|---|---|---|---|
+| P0 | 增加诊断记录：每任务PCM样本数/散列，每chunk prompt模式、language、generated_tokens/max_new_tokens、finish_reason；采集记录ADC块时间、松键时间及发送final时间 | 优先写旁路诊断记录，普通UI不暴露推理细节；不改变识别参数 | 为吞尾分清采集/传输/生成问题，并让参数试验可归因 |
+| P1 | 混合语言小样本对照：A保持auto；B仅指定Chinese；C保持MLX聊天模板/system为空，但assistant仅预置`<asr_text>`（Windows式正文前缀） | 先使用已有3条失败样本，加原本正常的中英混说、纯中文、纯英文对照；固定PCM/模型/量化/temperature=0/预算。每次仅改一项，听原录音确认，不以更像Windows为唯一成功条件 | B/C若减少翻译且保留英文术语，才成为候选；固定Chinese也可能把英文转成中文，不能直接全局上线 |
+| P1 | 吞尾专项：先复听已有20条严格尾缀候选的原文件，挑尾音清楚的样本检查原始生成记录；真实松键漏采则补采集时序留痕 | 原文件缺尾与原文件完整分别处理；只有length才单改预算至512，EOS则保留预算检查语言/尾部声学条件；repetition单列 | 避免用模型参数修采集缺陷，也避免因EOS正常结束就认定文本完整 |
+| P2 | 若P1指向语言前缀，再分别对照system通用文本、完整Windows模板；之后才对照temperature=0.4/top_k=50 | 完整Windows模板是组合对照，不能单独归因；随机采样须固定并记录seed，再换少量seed核查稳定性 | 判断收益来自前缀、system、模板边界还是采样；不把单次随机改善当稳定提升 |
+| P2 | 若完整音频以EOS漏尾，可单独对照末尾补100–200ms静音 | 只作为诊断假设，保留纯静音/短词对照检查幻觉；追加静音不能恢复已丢失真实样本 | 探测结束边界声学条件，不能据未经验证的假设改产品 |
+| P3 | 核查历史依赖与8bit/4bit量化及编码器数值差异；评估上游升级 | 前述入口语义固定后再开展；保留现有环境快照 | 当前证据不支持把降量化、全量升级或大改切分作为首选修复 |
+
+限定：C是诊断用新prompt模式，当前传language=None不会自动得到Windows式前缀；也不要传 `Chinese,English` 试图表示混合语言，CapsWriter语言映射不识别这个组合，会返回None。上游输出的逗号连接语言元数据不是这里支持的强制语言输入。
+
+首选顺序是“必要留痕 → 语言前缀单变量 → 吞尾分层定位”；不一起改prompt、temperature、token上限和量化。若仅部分异常样本改善但正常混说/纯英文退步，仍不能作为新默认。任何调优结论都需要原音频核对与对照样本，当前仅完成代码层建议。
+
+## 第一轮代码排查结论（2026-09-18）
+
+### 范围与结论边界
+
+用户 2026-09-18 再次澄清：整体精度是否下降并不确定，可能是使用要求提高；Windows 也存在识别问题。排查不得预设 macOS 整体精度劣化，当前重点仍是审查之前 Runner 重构是否引入代码错误，跨后端文本分歧只作辅助线索。
+
+审查主仓库 `76250e2` 及子仓库 `f069a0f → 25551b0`。用户确认 Windows 批跑来自其 CapsWriter-Offline fork 的 Custom 分支，未改变底层推理管线，可按官方 Windows 路线理解；尚未拿到精确 commit 和运行配置快照。本机 GGUF 源码是路线对照依据，而非已验证逐字一致的 Windows 执行快照。
+
+目前没有锁定一个能解释普通短句普遍退步的 Runner 新增缺陷。跨平台文本分歧已确认，但它不等同于历史回归，也不等同于 Mac 错误率。此次不修改生产推理代码，不做参数调优，不重启日常服务。
+
+### 已定位的代码事实
+
+| 区域 | 代码位置 | 审查结果 |
+|---|---|---|
+| 生成预算 | `mlx-qwen3-asr/mlx_qwen3_asr/capswriter_runner.py:33,240` | `max_new_tokens=None` 原样保留并传入 Session；按推理 chunk 时长计算 128–512 的预算，没有改成统一固定上限。 |
+| PCM 累积 | 同文件 `feed_audio`、`_concat_audio`、`_prepare_audio` | 实际协议 16k mono float32 下仅累积/拼接；未逐 patch 归一化、提特征、裁剪或补零。非 16k 的逐 patch 线性重采样确实不保证与整段重采样等价，但不属于当前服务端协议路径。 |
+| Session 调用 | 同文件 `_transcribe_prepared_audio` | final 仍调用既有 Session，语言映射和 context 默认与旧适配器一致；新增 `return_chunks=True` 控制结果元数据，未改变正文生成；没有接入 draft model。 |
+| 跨后端提示词 | `core/server/engines/qwen_asr_gguf/inference/asr.py:69` 与 `mlx-qwen3-asr/mlx_qwen3_asr/tokenizer.py:373` | auto 时 GGUF 预置 `<asr_text>`，MLX 留空 assistant 前缀让模型生成语言及正文分隔符；空 context 时 GGUF 使用 `You are a helpful assistant.`，MLX system 内容为空；GGUF 少了 MLX 模板中的两处消息边界换行。均不是这次 Runner 新改的参数。 |
+| 跨后端采样 | GGUF `asr_engine.py:44`、`inference/asr.py:128,192`、`inference/llama.py:665`；MLX `generate.py:29` | GGUF 路线默认 temperature=0.4、top_k=50、新随机种子；检测重复后加温重试；MLX 默认 temperature=0，贪心生成。不是同权重名称就代表相同推理过程；尚未证明哪项导致本批分歧。 |
+| 长音频编排 | `core/server/connection/ws_recv.py:88,166` | 新 MLX 路线绕过外层 60s 分段、4s overlap 及 WorkPipeline 拼接，整任务交给 Session 约 30s 切分。旧阈值为 68s；本批只有 12 条达到阈值，不能解释其余 2171 条实质差异。 |
+| 模型位宽 | 模型张量与 `diagnogs/runner_regression/20260917-220717/runtime.json` | 实际加载的 198 个量化模块全部为 8bit；config/model card 的 4bit 标注不符。Windows 用户报告为 4bit；位宽不同是变量，不能据此判断谁更准。 |
+| 独立录音缺陷 | `core/client/audio/recorder.py:142` | 首次跨过录音阈值且缓存非空时，`np.concatenate(self._cache)` 未包含当前 `task['data']`；当前 callback 块既未写盘也未发送，常见约 50ms。Git blame 回溯至 `e80e2181`（2026-01-10），早于 Runner；与这批同一已保存录音的服务端对照无因果对应。本轮仅记录，未修改。 |
+
+收尾追加审查：
+
+- `capswriter_runner.py::_prewarm_safely` 直接调用 Session，不进入 `_states`；`generate.py::generate` 每次调用 `model.create_cache`，没有沿用预热或上一条识别的 KV cache。
+- `work_handler.py::WorkBuffer` 同 task_id 用 deque FIFO，单 worker 串行执行；`ws_recv.py` 保留 final 所带 data，`feed_audio` 先追加数据再 finalize。正常连接且 task_id 唯一的路径中，未找到 patch 乱序、尾包被直接丢弃或提前清空任务的代码点。断连异常恢复不据此宣称完全无缺陷。
+- 新流水线复用 `TextFormatter`，但绕过旧 `_process_simple_merge` 中删除 `@@` 和压缩空白的清洗；外部 aligner 对 text_accu/时间戳的补齐也被替换为占位。这是实际输出处理差异，不是 prompt、音频特征或生成 token 改变的证据，不能拿来解释普通短句词语识别退步。
+
+### 2183 条实质差异主要是什么
+
+原始 Markdown 再次全量复核：9313 对，完全一致 5499、仅格式不同 1631、实质差异 2183。规则：`（空）` 归空、小写化、移除 Unicode 标点/符号/分隔符和空白。以下用 `difflib.SequenceMatcher(autojunk=False)` 对齐归一化后的字符串，相似度为 `2 × 匹配字符数 / 两串总字符数`；它不是 CER 或准确率。不同维度不能相加。
+
+| 观察维度 | 数量 | 占实质差异 |
+|---|---:|---:|
+| 字符相似度 ≥90% | 1708 | 78.2% |
+| 字符相似度 70%–90% | 384 | 17.6% |
+| 字符相似度 <70% | 91 | 4.2% |
+| 只有一处连续差异区 | 1485 | 68.0% |
+| 差异字符不含拉丁字母/数字 | 1577 | 72.2% |
+| 差异字符包含拉丁字母/数字 | 606 | 27.8% |
+
+主体是局部词字选择，包括同音词、代词、语气词及专业术语。字符对齐中的高频替换有 Mac「他」/Windows「它」139 次、Mac「唉」/Windows「哎」47 次、Mac「会话」/Windows「绘画」28 次。这是差异片段出现次数，不能全部计为 Mac 错误；部分差异单靠声音也不能唯一判定，技术语境下也存在 Windows 更不合理的输出。
+
+中英混合的显著异常有明确样本，但未占多数。按「Mac 无汉字且至少 15 个拉丁字母、Windows 至少 8 个汉字」保守筛出 3 条、反向为 0 条（此规则不是所有语言切换的完备检测）：
+
+- `20260908-233752`：Windows 为「Action, schedule, occurrence，这些还有没有有用的元信息？……」，Mac 后半段输出为英文「these. Have. Any useful original information? ...」。
+- `20260911-114212`：Windows 为「Codex，我们还正在干这件事情。直接用 software agent。」，Mac 为「Codex, we're still doing this thing. Directly use subagent.」。
+- `20260912-110033`：Windows 为「Mailbox ownership，这都是什么东西啊？」，Mac 为「Mailbox ownership. This is what things are.」。
+
+这些文本呈现疑似翻译或语言选择偏离；未据人工听音真值判错。提示词/语言前缀差异与此类现象机制上相关，但现阶段没有因果验证，不能写成已锁定根因。
+
+关于句尾：非空归一化文本严格前缀比较下，Mac 少尾缀 20 条、Windows 少尾缀 27 条；其中既有「文/文档」「毕不了/毕不了业」等词尾差异，也有语气词/重复尾字。因此既不能把所有尾缀差异叫作音频丢失，也不能据此排除其他不满足严格前缀关系的漏尾现象。
+
+关于空结果：Mac 独有空 16 条，其中 Windows 有 13 条仅「哎/嗯/啊」，另 3 条为「Yeah.」「没事。」「好，这个问题。」。不是大规模整句消失。
+
+超过 68s 的 12 条虽然均有实质差异，但两端相似度全部 >95%。长句更容易至少出现一处差异，不能把长音频的逐条不一致率当作整体字错误率。这里没有证据证明新切分更差。
+
+### 用户明确的两个独立症状（2026-09-18）
+
+用户指出「吞尾部」「中英混说变全英文」可能真实存在。它们不依赖“整体精度已退步”这一前提，必须分别审查；不能因发生次数少或尾缀差异双向存在而排除。
+
+**中英混说变全英文：已定位到生成阶段，未定位到 Runner 回归。** 3 条样本的已有原始 token 记录都以 `11528, 6364, 151704` 开始，对应 `language English<asr_text>`，后面为英文正文。旧 Session、Runner 整段、Runner 50ms 三路 token 完全相同：`20260908-233752` 为 36/220 token，`20260911-114212` 为 19/128，`20260912-110033` 为 13/128，均 EOS、未截断。源码及原始 token 表明它不是最后格式化/拼接把中文翻译为英文。当前自动语言条件下模型生成了这一输出；尚不能把语言标记本身写成已经证实的原因，也不能把同环境复现旧调用等同于历史运行环境复原。
+
+**吞尾部：锁定采集结束边界风险，尚未确认具体病例的根因。** `core/client/shortcut/task.py::finish` 先 `state.stop_recording()` 再关输入流；`core/client/audio/stream.py::_audio_callback` 在 recording=false 时直接 return，后续 callback 即使含有松键前采集的内容也不交付；按需模式关闭活跃流未设置按采集时间排空尾部的机制。blocksize 为 50ms，但实际受设备缓冲与回调延迟影响，不能据此宣称丢失量固定或上限必为 50ms。`d9e79d4`（2026-08-23）新增 abort 是为解决句柄泄漏；本机 sounddevice 的 `close()` 文档也明确 active stream 的 pending buffers 会被丢弃，因此不能把新增 abort 单独定性为新吞尾回归。recording 门控与按需关闭均早于 Runner。相同已保存录音的服务端对照不能看到未保存进去的尾音。
+
+客户端 `recorder.py` 对发送使用 `asyncio.create_task` 而没有显式等待全部发送完成再 final，保留为收尾契约的审查点；当前 WebSocket 发送实现和已有服务端记录尚未提供 final 超车的证据，不把缺少显式屏障直接宣称为已复现乱序。
+
+### 验证记录与尚未回答的问题
+
+- 本轮只审查代码与已有转录文本，没有新增模型推理。统计已从原始两端 Markdown 独立全量复核；画像及可回查例子保存在 `diagnogs/runner_regression/text_difference_profile.json`。
+- 前轮留下的 32+8 条运行记录显示：同一现有权重和依赖下，重建的旧 Session 调用、Runner 整段和 Runner 小 patch 路径，PCM/特征/prompt/生成 token/文本均一致，且均无 length 截断、与已保存 Mac 输出一致。它们仅支持当前环境调用等价，不能证明早期真实运行环境与现在相同；也未覆盖旧服务端长音频拼接。
+- 未确认：历史 MLX 依赖与实际加载包是否漂移、Windows 当次精确执行快照、跨后端提示词/采样/编码器/量化各自对差异的贡献。没有人工真值，不能给出两端总体准确率排名。
+- 第一轮阶段汇报后停下；没有凭跨后端分歧直接改 MLX prompt、强制中文或改采样参数。
+
 ## 文档目的
 
 本文档记录 CapsWriter for macOS 当前阶段的 ASR 调优总口径、第一轮评测数据集组合方案，以及首要需要解决的问题。

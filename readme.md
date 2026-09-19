@@ -176,7 +176,22 @@ capswriter uninstall # 取消自启
 1. **长按 Caps Lock** → 开始录音（保持按住）
 2. **松开** → 识别完成，写入剪贴板
 3. **粘贴** →软件客户端尝试将结果自动粘贴到光标位置一次，**推荐配合maccy等剪贴板历史管理工具使用本软件**，便捷找回转录历史。
-4. **短按 Caps Lock**（< 0.3 秒）→ 正常切换大小写，不触发录音
+4. **短按 Caps Lock**（< 0.2 秒）→ 正常切换大小写，不触发录音
+
+### 录音启停与故障诊断
+
+macOS 默认在长按达到 200ms 后按需打开内建麦克风，松手请求关闭；无内建麦克风时回退到系统默认输入。采集采用 20ms 音频块和低延迟模式，空闲不预先占用麦克风。
+
+若底层关闭超过 1 秒或返回错误，客户端会提示并暂停新录音，避免在未释放的流上反复开流或重载音频库。后台关闭稍后成功可恢复录音；持续失败时请从菜单栏重启 CapsWriter。超时提示不等于系统已释放麦克风。
+
+开发回归入口（不使用真实麦克风）：
+
+```bash
+.venv/bin/python tools/test_stream_stop_leak.py
+.venv/bin/python tools/test_mic_shortcut_lifecycle.py
+```
+
+启停机制与验证边界见 [macOS 架构决策](docs/macos-architecture-decisions.md#十客户端麦克风生命周期)。
 
 ### 菜单栏图标
 
@@ -226,11 +241,25 @@ capswriter restart
 
 | 文档 | 路径 | 内容 |
 |------|------|------|
-| macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、推理后端演进等核心决策 |
+| macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、麦克风启停与推理后端核心决策 |
 | Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
-| ASR 调优总文档 | `docs/ASR调优总文档.md` | 当前 ASR 调优口径、第一轮评测数据集组合方案和首要问题 |
+| ASR 调优总文档 | `docs/ASR调优总文档.md` | ASR 默认值、回归排查证据、Worker延迟/顺序调度、语言前缀修复与回退方式、评测入口 |
 
 ---
+
+## 调度与音频回归检查
+
+以下检查不加载识别模型、不占用麦克风：
+
+```bash
+.venv/bin/python tools/test_worker_scheduling.py -v
+.venv/bin/python tools/test_mic_shortcut_lifecycle.py -v
+.venv/bin/python tools/test_stream_stop_leak.py -v
+```
+
+Worker对同一连接的音频包与结束标记保持FIFO、跨连接轮转；已有待处理包时不等待未来包，每轮收包有数量上限。Runner最终日志将`final排队`和`final处理`分别记录，`耗时`仍是提交至完成的总时长。
+
+当前Qwen MLX Runner在录音期间接收并缓存音频，收到结束标记后才调用模型；模型内部的≤30秒切分发生在此次调用中。录音过程中提前推理稳定片段尚未实现。
 
 ## 与原版的区别
 
@@ -238,6 +267,7 @@ capswriter restart
 |------|----------------|-----------------|
 | 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
 | 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与 MLX wired memory 常驻额度 |
+| 自动语言转写 | 依后端实现 | Qwen MLX Runner 默认预置正文前缀以改善中英混说；显式语言优先；自动模式语言元数据为 unknown，时间戳/说话人对齐仍保留语言识别入口 |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |

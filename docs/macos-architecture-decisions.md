@@ -494,3 +494,30 @@ wiring + 启动预热属于**中层推理编排**，与「MLX 后端演进路线
 [MLX `set_wired_limit` 文档](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_wired_limit.html)、
 [Metal — MLX 文档](https://ml-explore.github.io/mlx/build/html/python/metal.html)、
 [What 19 GB of Memory Compression Taught Me About MLX on M1 Max](https://dev.to/sleepyquant/what-19-gb-of-memory-compression-taught-me-about-mlx-on-m1-max-3eha)。
+
+
+## 十、客户端麦克风生命周期
+
+### 交互与边界（2026-09-18 用户确认）
+
+- 保留短按切换大小写、长按 200ms 才开始占用麦克风、松手结束；本轮不通过提前开麦或缩短判定阈值换取速度。
+- 内建麦克风是 macOS 首选；无内建设备时刷新设备表并跟随默认输入。默认输入切换后旧设备仍可能正常打开，因此回退路径不能仅依赖开流失败来刷新。
+- 启动/停止必须配对；任务业务结束与底层句柄已释放是两个状态，不得仅凭 `recording=False` 或 `state.stream=None` 宣称关闭成功。
+
+### 实现约束
+
+1. 长按控制器在同一业务队列按顺序执行开始/结束，迟到的旧定时器以按压代号拒绝；退出或键盘接管失效时撤销未执行启动并结束在途录音。
+2. 任务在 begin、状态与消费者发布完毕前持续处于启动中；松手/取消登记后再收尾。每次录音使用独立队列，开始、音频、结束均由事件循环按投递顺序入队；迟到音频保留原队列，不污染下一条。
+3. macOS 采用 48kHz float32、20ms 块和 `latency='low'`；其它平台保持 50ms 与原默认延迟。实时回调只复制和投递，能量统计、日志和 trace 更新在普通事件循环执行，避免原生关闭等待被日志阻塞的回调。
+4. 正常内建设备录音不再反复 terminate/dlopen；开流失败且旧资源已释放时最多刷新设备表后重试一次。刷新使用 terminate/initialize，不 dlclose 动态库。
+5. 关闭先请求回调主动退出，最多给 120ms 等待窗口，再在普通线程执行 `abort(ignore_errors=False)` 与 `close(ignore_errors=False)`。错误码不得静默忽略。正常关闭成功才释放资源归属；最长同步等待 1 秒，超时或错误保留故障流引用，禁止重开/重载。超时后原关闭若成功，下一次录音可继续。
+6. 原生 finished callback 只发信号；意外结束后的重开在回调之外执行，并用流代号拒绝过期恢复请求。不得从原生回调栈关闭或重建正在回调的流。
+7. 初始缓存跨过录音阈值时，缓存与当前音频块一并发送/保存，不能固定遗漏跨阈值的那一块。
+
+PortAudio 对实时回调的阻塞/重入限制见 [官方回调说明](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)。具体采集启停语义见 [官方生命周期说明](https://portaudio.com/docs/v19-doxydocs/start_stop_abort.html)。
+
+### 验证与恢复边界
+
+- 隔离验证：`tools/test_stream_stop_leak.py` 覆盖严格关闭错误码、超时资源归属、单次重试、迟到音频、分块兼容与缓存完整性；`tools/test_mic_shortcut_lifecycle.py` 覆盖正常松手的启动空窗、幂等结束、取消、退出以及初始化异常。
+- 模拟测试不能证明 CoreAudio 偶发卡死已根治。Python 无法安全强杀卡在原生库里的线程；持续关闭失败仍需重启客户端释放进程资源。未来若要求此类故障完全自动恢复，需单独评估音频进程隔离及麦克风归属/权限成本。
+- 延迟日志拆分 `device_ms / construct_ms / start_ms / total_ms`，关闭记录 `callback_exit / abort / close` 阶段；不能只看旧版统一 `stream.close()` 超时文字推断真实卡点。
