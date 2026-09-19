@@ -196,6 +196,8 @@ evals/datasets/**/tmp/
 .claude
 .vscode
 .agent
+# 本机个人配置覆盖（如 macos_mic_device='builtin'），不随发布入库
+config_client_local.py
 
 diag*.py
 test_*.py 

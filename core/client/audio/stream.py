@@ -230,9 +230,9 @@ class AudioStreamManager:
         """
         在设备列表中查找 Mac 内建麦克风，返回其设备索引。
 
-        临时策略（2026-08-12）：默认输入设备会跟随耳机 / AirPods 等外设自动切换，
-        而耳机麦克风收音效果差，用户希望固定使用本机内建麦克风录音。这里按设备名
-        匹配内建麦克风：
+        供 `macos_mic_device = 'builtin'` 模式使用：默认输入设备会跟随耳机 /
+        AirPods 等外设自动切换，而耳机麦克风收音效果差，该模式固定使用本机内建
+        麦克风录音。按设备名匹配内建麦克风：
         - 中文系统：`MacBook Air麦克风`、`MacBook Pro麦克风`、`内建麦克风`
         - 英文系统：`MacBook Air Microphone`、`Built-in Microphone`
         找不到（例如 Mac mini 外接声卡）时返回 None，由调用方回退到默认输入设备。
@@ -251,8 +251,36 @@ class AudioStreamManager:
             logger.warning(f"查找内建麦克风失败: {e}")
         return None
 
+    def _select_device_index(self, is_macos: bool, *, force_refresh: bool) -> Optional[int]:
+        """
+        按配置选择本次开流的设备索引；返回 None 表示跟随系统默认输入设备。
+
+        两种模式（`Config.macos_mic_device`）：
+        - `'default'`（发布默认，普适逻辑）：跟随系统当前默认输入设备。PortAudio
+          在进程初始化时缓存默认设备索引，插拔耳机或加载虚拟声卡后，旧默认设备
+          可能照样打开成功却录错设备——这种静默错误靠开流失败重试发现不了，
+          因此该模式每次开流前都刷新设备表（本机实测约 0.6ms，不影响开麦速度）。
+        - `'builtin'`（个人场景，如常戴耳机避免默认输入被耳机麦接管）：优先按
+          设备名匹配 Mac 内建麦克风；快速路径不刷新设备表，找不到时刷新后重找，
+          仍找不到则回退跟随默认输入。
+        """
+        if not is_macos:
+            return None
+        from config_client import ClientConfig as Config
+
+        if getattr(Config, 'macos_mic_device', 'default') != 'builtin':
+            self._reload_portaudio()
+            return None
+        if force_refresh:
+            self._reload_portaudio()
+        index = self._find_builtin_mic()
+        if index is None and not force_refresh:
+            self._reload_portaudio()
+            index = self._find_builtin_mic()
+        return index
+
     def start(self) -> Optional[sd.InputStream]:
-        """串行创建/启动流；正常路径不刷新设备，失败时仅安全重试一次。"""
+        """串行创建/启动流；设备表刷新策略见 `_select_device_index`，失败时仅安全重试一次。"""
         with self._session_lock:
             if self._closing_stream is not None or self._close_error:
                 logger.error("[audio] 旧流尚未可靠释放，拒绝重新打开麦克风；请重启客户端")
@@ -270,14 +298,7 @@ class AudioStreamManager:
             for attempt in range(2 if is_macos else 1):
                 stream = None
                 try:
-                    if attempt:
-                        self._reload_portaudio()
-                    device_index = self._find_builtin_mic() if is_macos else None
-                    if is_macos and device_index is None and not attempt:
-                        # 无内建麦克风时仍须跟随系统默认输入；旧默认设备即使已不再是
-                        # 默认，也可能继续成功打开，因此这条回退路径必须先刷新设备表。
-                        self._reload_portaudio()
-                        device_index = self._find_builtin_mic()
+                    device_index = self._select_device_index(is_macos, force_refresh=bool(attempt))
                     device = (sd.query_devices(device_index) if device_index is not None
                               else sd.query_devices(kind='input'))
                     self._channels = min(2, device['max_input_channels'])

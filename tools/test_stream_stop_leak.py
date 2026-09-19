@@ -129,6 +129,7 @@ class StreamTests(unittest.TestCase):
         mgr = manager()
         stream = FakeStream()
         with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.multiple(Config, macos_mic_device='builtin'), \
              patch.object(mgr, '_find_builtin_mic', return_value=0), \
              patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
              patch('core.client.audio.stream.sd.InputStream', return_value=stream) as opened, \
@@ -146,6 +147,7 @@ class StreamTests(unittest.TestCase):
         failed = FakeStream(start_error=RuntimeError('device changed'))
         good = FakeStream()
         with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.multiple(Config, macos_mic_device='builtin'), \
              patch.object(mgr, '_find_builtin_mic', return_value=0), \
              patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
              patch('core.client.audio.stream.sd.InputStream', side_effect=[failed, good]), \
@@ -160,6 +162,7 @@ class StreamTests(unittest.TestCase):
         mgr = manager()
         failed = FakeStream(start_error=RuntimeError('start failed'), error=RuntimeError('close failed'))
         with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.multiple(Config, macos_mic_device='builtin'), \
              patch.object(mgr, '_find_builtin_mic', return_value=0), \
              patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
              patch('core.client.audio.stream.sd.InputStream', return_value=failed) as opened, \
@@ -209,15 +212,34 @@ class StreamTests(unittest.TestCase):
             self.assertTrue(mgr._running, '常驻模式录音结束不关闭设备')
             mgr.stop()
 
-    def test_default_input_fallback_refreshes_without_builtin(self):
+    def test_default_mode_refreshes_and_follows_system_default(self):
+        """发布默认 default 模式：每次开流刷新设备表，不找内建麦，跟随系统默认输入。"""
         mgr = manager()
         with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
-             patch.object(mgr, '_find_builtin_mic', return_value=None), \
+             patch.multiple(Config, macos_mic_device='default'), \
+             patch.object(mgr, '_find_builtin_mic') as find_builtin, \
              patch.object(mgr, '_reload_portaudio') as reload, \
              patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
-             patch('core.client.audio.stream.sd.InputStream', return_value=FakeStream()):
+             patch('core.client.audio.stream.sd.InputStream', return_value=FakeStream()) as opened:
             self.assertTrue(mgr.start_recording_session())
             reload.assert_called_once()
+            find_builtin.assert_not_called()
+            self.assertIsNone(opened.call_args.kwargs['device'])
+            mgr.stop_recording_session()
+
+    def test_builtin_mode_refreshes_once_when_builtin_missing(self):
+        """builtin 模式找不到内建麦：刷新设备表重找一次，仍无则回退默认输入。"""
+        mgr = manager()
+        with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.multiple(Config, macos_mic_device='builtin'), \
+             patch.object(mgr, '_find_builtin_mic', return_value=None) as find_builtin, \
+             patch.object(mgr, '_reload_portaudio') as reload, \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', return_value=FakeStream()) as opened:
+            self.assertTrue(mgr.start_recording_session())
+            reload.assert_called_once()
+            self.assertEqual(find_builtin.call_count, 2)
+            self.assertIsNone(opened.call_args.kwargs['device'])
             mgr.stop_recording_session()
 
 

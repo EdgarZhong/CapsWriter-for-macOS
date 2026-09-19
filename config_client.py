@@ -47,6 +47,12 @@ class ClientConfig:
     macos_caps_restore_on_exit = True
     macos_caps_open_stream_on_demand = platform.system() == 'Darwin'
 
+    # macOS 录音设备选择：
+    # 'default'（发布默认，普适）：跟随系统当前默认输入设备，每次开流前刷新设备表；
+    # 'builtin'：优先使用 Mac 内建麦克风（个人场景，例如常戴耳机、避免默认输入被
+    # 系统自动切到耳机麦）。找不到内建麦时仍回退跟随默认输入。
+    macos_mic_device = 'default'
+
     paste        = False        # 是否以写入剪切板然后模拟 Ctrl-V 粘贴的方式输出结果
     restore_clip = True         # 模拟粘贴后是否恢复剪贴板
     paste_apps   = ['WeiXin.exe', 'Telegram.exe']  # 匹配时强制粘贴
@@ -148,3 +154,14 @@ r"""
   {'key': 'f12', 'type': 'keyboard', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
   {'key': 'x2', 'type': 'mouse', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
 """
+
+
+# 本地个人配置覆盖（可选，不入库，见 .gitignore 的 config_client_local.py）：
+# 用于保存与发布默认值不同的本机偏好，例如 `ClientConfig.macos_mic_device = 'builtin'`。
+# 在本模块导入末尾执行，保证任何使用方拿到的都是覆盖后的最终值。
+_local_config_path = Path(BASE_DIR) / 'config_client_local.py'
+if _local_config_path.exists():
+    exec(  # noqa: S102 - 有意执行本机用户自己的配置文件
+        compile(_local_config_path.read_text(encoding='utf-8'), str(_local_config_path), 'exec'),
+        {'ClientConfig': ClientConfig},
+    )
