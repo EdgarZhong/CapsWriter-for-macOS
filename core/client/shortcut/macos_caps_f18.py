@@ -118,6 +118,8 @@ class MacOSCapsF18Bridge:
     def stop(self) -> None:
         """停止 F18 监听。"""
         logger.info("macOS Caps F18 bridge stopping")
+        # 先撤销业务定时器/排队启动，再停止监听，避免退出过程中迟到的长按开流。
+        self._controller.stop()
         self._listener.stop()
 
     def check_health(self) -> None:
@@ -142,6 +144,9 @@ class MacOSCapsF18Bridge:
             if self._handled:
                 return  # 已处理过，避免重复弹窗/通知
             self._handled = True
+
+        # 接管失效后不会再收到可靠 keyUp，必须主动结束已经开始或尚在启动的录音。
+        self._controller.stop()
 
         logger.warning("[caps-f18-bridge] CGEventTap 真故障/未就绪，恢复键盘并引导用户")
 
@@ -197,6 +202,10 @@ class MacOSCapsF18Bridge:
     def _stop_recording(self) -> None:
         """长按结束后，复用现有 `caps_lock` 结束录音路径。"""
         self.app.shortcut.stop_press_to_talk("caps_lock")
+        # 撤权时 stop 经业务队列稍后执行，state.stop_recording 会写 ready；
+        # 必须恢复已确认的键盘故障态，避免结束录音把权限故障覆盖为绿色。
+        if self._handled and getattr(self.app, 'error_bus', None):
+            self.app.error_bus.update(state='error', accessibility_ok=False)
 
     def _mark_last_problem(self) -> None:
         """由 active event tap 吞掉 ⌃⌥M 后，在工作线程执行统一标记入口。"""

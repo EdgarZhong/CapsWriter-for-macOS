@@ -1,136 +1,248 @@
 # coding: utf-8
+"""麦克风生命周期隔离回归：不打开真实设备，不改系统权限。
+
+运行：.venv/bin/python tools/test_stream_stop_leak.py
+以受控事件模拟原生关闭卡住/迟到返回/错误码，并检查重试期间资源归属。
 """
-AudioStreamManager.stop() 泄漏修复的隔离冒烟测试（2026-08-23）。
-
-背景：macOS 上「抬手松开后麦克风指示灯常亮、只能重启恢复」的根因是
-stream.close() 挂死被 5s 超时放弃 / close 抛异常被 DEBUG 吞掉，两个泄漏口
-都不留痕。修复后的 stop() 要求：
-1. close 前先对 active 流调用 abort()；
-2. close 成功 -> INFO 正常留痕、不发通知；
-3. close 挂死 -> 5s 超时后 ERROR 留痕 + ErrorBus 通知；
-4. close 抛异常 -> ERROR 留痕 + ErrorBus 通知；
-5. start() 失败路径回收已创建的流（本脚本不覆盖，逻辑简单由人审）。
-
-用法：项目根目录下 `.venv/bin/python tools/test_stream_stop_leak.py`
-"""
-
 from __future__ import annotations
 
+import asyncio
+import base64
 import sys
 import threading
-import time
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-# 保证从任意 cwd 运行都能导入项目包
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config_client import ClientConfig as Config
+from core.client.audio.stream import AudioStreamManager
+from core.client.audio.recorder import AudioRecorder
+from core.client.state import ClientState
 
 
-class FakeErrorBus:
-    """记录 notify 调用的假 ErrorBus"""
-
-    def __init__(self):
+class FakeStream:
+    """模拟流方法；事件使超时可重复，严格检查 ignore_errors 防止假成功。"""
+    def __init__(self, *, blocked=None, error=None, start_error=None):
+        self.blocked = blocked
+        self.error = error
+        self.start_error = start_error
         self.calls = []
 
-    def notify(self, message, key):
-        self.calls.append((message, key))
+    def start(self):
+        self.calls.append('start')
+        if self.start_error:
+            raise self.start_error
+
+    def abort(self, *, ignore_errors):
+        self.calls.append(('abort', ignore_errors))
+
+    def close(self, *, ignore_errors):
+        self.calls.append(('close', ignore_errors))
+        if self.blocked:
+            self.blocked.wait(2)
+        if self.error:
+            raise self.error
 
 
-class FakeStreamBase:
-    """可编排行为的假 sounddevice.InputStream"""
-
-    def __init__(self, *, close_block=False, close_raise=None):
-        self.abort_called = False
-        self.close_called = False
-        self._close_block = close_block
-        self._close_raise = close_raise
-        self._never = threading.Event()
-
-    @property
-    def active(self):
-        return True
-
-    def abort(self):
-        self.abort_called = True
-
-    def close(self):
-        self.close_called = True
-        if self._close_raise is not None:
-            raise self._close_raise
-        if self._close_block:
-            self._never.wait(timeout=60)  # 模拟 Pa_CloseStream 卡死
+def manager(stream=None):
+    """使用正式构造函数，以保证新增生命周期字段同生产一致。"""
+    app = SimpleNamespace(state=ClientState(), loop=None, error_bus=Mock())
+    mgr = AudioStreamManager(app)
+    app.state.stream = stream
+    mgr._running = stream is not None
+    mgr._recording_session_count = int(stream is not None)
+    mgr.CLOSE_TIMEOUT = 0.03
+    mgr.CALLBACK_STOP_TIMEOUT = 0
+    return mgr
 
 
-def build_manager(fake_stream):
-    """绕过 __init__ 构造 AudioStreamManager 并注入假依赖"""
-    from core.client.audio.stream import AudioStreamManager
+class StreamTests(unittest.TestCase):
+    """验证成功、原生错误及未完成关闭的真实行为，而非只检查通知存在。"""
+    def setUp(self):
+        # 原生模拟的30ms超时不应受 Rich traceback 绘制耗时左右，另用日志断言
+        # 区分成功/失败，避免把终端渲染当成音频行为。
+        self.logs = patch('core.client.audio.stream.logger').start()
+        self.addCleanup(patch.stopall)
 
-    mgr = AudioStreamManager.__new__(AudioStreamManager)
-    eb = FakeErrorBus()
-    # state 是只读 property（返回 app.state），因此流对象经由 app.state 注入
-    mgr.app = SimpleNamespace(
-        error_bus=eb,
-        state=SimpleNamespace(stream=fake_stream),
-    )
-    mgr._running = True
-    mgr._recording_session_count = 1
-    mgr._channels = 1
-    return mgr, eb
+    def test_close_checks_errors_and_is_idempotent(self):
+        stream = FakeStream()
+        mgr = manager(stream)
+        mgr.stop()
+        mgr.stop()
+        self.assertEqual(stream.calls, [('abort', False), ('close', False)])
+        self.assertIsNone(mgr._closing_stream)
+        mgr.app.error_bus.notify.assert_not_called()
+
+    def test_close_failure_keeps_ownership_and_blocks_reload(self):
+        stream = FakeStream(error=RuntimeError('native close failed'))
+        mgr = manager(stream)
+        mgr.stop()
+        self.assertIs(mgr._closing_stream, stream)
+        with patch('core.client.audio.stream.sd.InputStream') as opened:
+            self.assertIsNone(mgr.start())
+            opened.assert_not_called()
+        with patch('core.client.audio.stream.sd._terminate') as terminate:
+            with self.assertRaises(RuntimeError):
+                mgr._reload_portaudio()
+            terminate.assert_not_called()
+        mgr.app.error_bus.notify.assert_called_once()
+        mgr.app.error_bus.update.assert_called_with(state='error', microphone_ok=False)
+
+    def test_timeout_retains_stream_until_late_success(self):
+        release = threading.Event()
+        mgr = manager(FakeStream(blocked=release))
+        try:
+            mgr.stop()
+            self.assertTrue(mgr._close_thread.is_alive())
+            self.assertIsNotNone(mgr._closing_stream)
+            with patch('core.client.audio.stream.sd.InputStream') as opened:
+                self.assertFalse(mgr.start_recording_session())
+                opened.assert_not_called()
+            mgr.app.error_bus.notify.assert_called_once()
+        finally:
+            release.set()
+            mgr._close_thread.join(1)
+        self.assertIsNone(mgr._closing_stream)
+        self.assertFalse(mgr._close_error)
+
+    def test_callback_exits_without_enqueue_after_stop(self):
+        import sounddevice as sd
+        mgr = manager()
+        mgr._stop_requested.set()
+        with self.assertRaises(sd.CallbackAbort):
+            mgr._audio_callback(np.ones((960, 1)), 960, None, None)
+
+    def test_finished_callback_never_reopens_in_native_stack(self):
+        mgr = manager(FakeStream())
+        mgr.app.loop = Mock()
+        with patch.object(mgr, 'reopen') as reopen:
+            mgr._on_stream_finished()
+            self.assertTrue(mgr._stream_finished.is_set())
+            reopen.assert_not_called()
+            mgr.app.loop.call_soon_threadsafe.assert_called_once()
+
+    def test_normal_start_does_not_refresh_and_uses_low_latency(self):
+        mgr = manager()
+        stream = FakeStream()
+        with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.object(mgr, '_find_builtin_mic', return_value=0), \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', return_value=stream) as opened, \
+             patch.object(mgr, '_reload_portaudio') as reload:
+            self.assertTrue(mgr.start_recording_session())
+            reload.assert_not_called()
+            self.assertEqual(opened.call_args.kwargs['blocksize'], 960)
+            self.assertEqual(opened.call_args.kwargs['latency'], 'low')
+            self.assertEqual(mgr._recording_session_count, 1)
+            mgr.stop_recording_session()
+        self.assertIsNone(mgr._closing_stream)
+
+    def test_start_failure_closes_before_single_retry(self):
+        mgr = manager()
+        failed = FakeStream(start_error=RuntimeError('device changed'))
+        good = FakeStream()
+        with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.object(mgr, '_find_builtin_mic', return_value=0), \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', side_effect=[failed, good]), \
+             patch.object(mgr, '_reload_portaudio') as reload:
+            self.assertTrue(mgr.start_recording_session())
+            self.assertEqual(failed.calls[-1], ('close', False))
+            reload.assert_called_once()
+            self.assertEqual(mgr._recording_session_count, 1)
+            mgr.stop_recording_session()
+
+    def test_failed_start_with_failed_close_cannot_retry(self):
+        mgr = manager()
+        failed = FakeStream(start_error=RuntimeError('start failed'), error=RuntimeError('close failed'))
+        with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.object(mgr, '_find_builtin_mic', return_value=0), \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', return_value=failed) as opened, \
+             patch.object(mgr, '_reload_portaudio') as reload:
+            self.assertFalse(mgr.start_recording_session())
+            self.assertEqual(opened.call_count, 1)
+            reload.assert_not_called()
+            self.assertEqual(mgr._recording_session_count, 0)
+
+    def test_callback_defers_metrics_and_copies_audio(self):
+        mgr = manager()
+        mgr.app.loop = Mock()
+        mgr.state.queue_in = asyncio.Queue()
+        mgr.state.start_recording(1.0, trace_id='one')
+        data = np.ones((960, 1), dtype=np.float32)
+        with patch.object(mgr.state, 'mark_audio_metrics') as metrics:
+            mgr._audio_callback(data, 960, None, None)
+            metrics.assert_not_called()
+            callback, copied, frames, ts, trace, status, queue_in = mgr.app.loop.call_soon_threadsafe.call_args.args
+            data[:] = 0
+            callback(copied, frames, ts, trace, status, queue_in)
+            metrics.assert_called_once()
+        np.testing.assert_array_equal(mgr.state.queue_in.get_nowait()['data'], np.ones((960, 1)))
+
+    def test_late_callback_keeps_original_queue(self):
+        mgr = manager()
+        mgr.app.loop = Mock()
+        old_queue = mgr.state.queue_in
+        mgr.state.start_recording(1., trace_id='old')
+        mgr._audio_callback(np.ones((960, 1)), 960, None, None)
+        callback, *args = mgr.app.loop.call_soon_threadsafe.call_args.args
+        mgr.state.stop_recording()
+        mgr.state.queue_in = asyncio.Queue()
+        callback(*args)
+        self.assertEqual(old_queue.qsize(), 1)
+        self.assertTrue(mgr.state.queue_in.empty())
+
+    def test_non_macos_keeps_blocksize_and_default_latency(self):
+        mgr = manager()
+        with patch('core.client.audio.stream.platform.system', return_value='Windows'), \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', return_value=FakeStream()) as opened:
+            self.assertTrue(mgr.start_recording_session())
+            self.assertEqual(opened.call_args.kwargs['blocksize'], 2400)
+            self.assertNotIn('latency', opened.call_args.kwargs)
+            mgr.stop_recording_session()
+            self.assertTrue(mgr._running, '常驻模式录音结束不关闭设备')
+            mgr.stop()
+
+    def test_default_input_fallback_refreshes_without_builtin(self):
+        mgr = manager()
+        with patch('core.client.audio.stream.platform.system', return_value='Darwin'), \
+             patch.object(mgr, '_find_builtin_mic', return_value=None), \
+             patch.object(mgr, '_reload_portaudio') as reload, \
+             patch('core.client.audio.stream.sd.query_devices', return_value={'max_input_channels': 1}), \
+             patch('core.client.audio.stream.sd.InputStream', return_value=FakeStream()):
+            self.assertTrue(mgr.start_recording_session())
+            reload.assert_called_once()
+            mgr.stop_recording_session()
 
 
-def case_normal():
-    """close 正常：abort 被调用、close 完成无通知"""
-    s = FakeStreamBase()
-    mgr, eb = build_manager(s)
-    t0 = time.perf_counter()
-    mgr.stop()
-    elapsed = time.perf_counter() - t0
-    assert s.abort_called, "close 前必须先 abort active 流"
-    assert s.close_called, "close 必须被调用"
-    assert mgr.state.stream is None and not mgr._running
-    assert eb.calls == [], "正常关闭不应发泄漏通知"
-    assert elapsed < 2.0, f"正常关闭不应超时（耗时 {elapsed:.2f}s）"
-    print(f"  case_normal: PASS ({elapsed:.3f}s)")
-
-
-def case_close_hang():
-    """close 挂死：5s 超时后发泄漏通知"""
-    s = FakeStreamBase(close_block=True)
-    mgr, eb = build_manager(s)
-    t0 = time.perf_counter()
-    mgr.stop()
-    elapsed = time.perf_counter() - t0
-    assert s.abort_called and s.close_called
-    assert 4.5 <= elapsed <= 7.0, f"应等待约 5s 超时（实际 {elapsed:.2f}s）"
-    assert len(eb.calls) == 1 and eb.calls[0][1] == 'stream_leak', "挂死必须发 stream_leak 通知"
-    print(f"  case_close_hang: PASS ({elapsed:.2f}s, 通知已发)")
-
-
-def case_close_raise():
-    """close 抛异常：发泄漏通知"""
-    s = FakeStreamBase(close_raise=RuntimeError("mock pa error"))
-    mgr, eb = build_manager(s)
-    mgr.stop()
-    assert s.abort_called and s.close_called
-    assert len(eb.calls) == 1 and eb.calls[0][1] == 'stream_leak'
-    print("  case_close_raise: PASS (通知已发)")
-
-
-def case_double_stop_idempotent():
-    """重复 stop 幂等：第二次直接返回不炸"""
-    s = FakeStreamBase()
-    mgr, eb = build_manager(s)
-    mgr.stop()
-    mgr.stop()  # _running 已 False，应早退
-    assert len(eb.calls) == 0
-    print("  case_double_stop_idempotent: PASS")
+class RecorderTests(unittest.IsolatedAsyncioTestCase):
+    """解码实际发送的PCM，确认跨阈值的当前块没有被丢弃或重复。"""
+    async def test_cross_threshold_preserves_every_block(self):
+        state = ClientState()
+        state.queue_in = asyncio.Queue()
+        recorder = AudioRecorder(SimpleNamespace(state=state))
+        recorder._send_message = AsyncMock()
+        state.queue_in.put_nowait({'type': 'begin', 'time': 1., 'trace_id': 'test'})
+        for timestamp, value in [(1.1, 1.), (1.2, 2.), (1.31, 3.), (1.4, 4.)]:
+            state.queue_in.put_nowait({'type': 'data', 'time': timestamp,
+                                      'data': np.full((6, 1), value, dtype=np.float32)})
+        state.queue_in.put_nowait({'type': 'finish', 'time': 1.5})
+        with patch.multiple(Config, save_audio=False, threshold=0.3):
+            await recorder.record_and_send()
+            await asyncio.sleep(0)
+        messages = [call.args[0] for call in recorder._send_message.await_args_list]
+        pcm = np.concatenate([np.frombuffer(base64.b64decode(m.data), dtype=np.float32)
+                              for m in messages if m.data])
+        np.testing.assert_array_equal(pcm, [1., 1., 2., 2., 3., 3., 4., 4.])
+        self.assertTrue(messages[-1].is_final)
+        self.assertAlmostEqual(recorder._duration, 24 / 48000)
 
 
 if __name__ == '__main__':
-    print("stream.stop() 泄漏修复冒烟测试：")
-    case_normal()
-    case_close_hang()
-    case_close_raise()
-    case_double_stop_idempotent()
-    print("全部通过 ✅")
-    sys.exit(0)
+    unittest.main(verbosity=2)
