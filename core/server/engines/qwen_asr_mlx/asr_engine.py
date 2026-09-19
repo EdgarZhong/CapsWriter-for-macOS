@@ -32,8 +32,8 @@ class ASREngineConfig:
     Attributes:
         model: 本地模型目录或 Hugging Face 仓库 ID。
         enable_startup_prewarm: 是否在 server 启动时做一次真实推理预热。
-        enable_wired_memory: 是否允许 Runner 设置 MLX wired memory 常驻额度。
-        wired_memory_limit: wired memory 额度，'auto' 表示由 package 根据 active memory 估算。
+        enable_wired_memory: 是否要求Runner锁住全部权重页；失败时拒绝启动。
+        wired_memory_limit: 权重锁页预算上限，'auto' 由package根据active memory估算。
     """
 
     model: str
@@ -254,10 +254,11 @@ class QwenASRMLXEngine(BaseASREngine):
             logger.info("Qwen Runner wired memory disabled")
         elif wired.get("ok"):
             logger.info(
-                "Qwen Runner wired memory enabled: "
+                "Qwen Runner weights locked: "
+                f"method={wired.get('method')}, "
+                f"locked={self._format_bytes(int(wired.get('locked_bytes', 0)))}, "
                 f"active={self._format_bytes(int(wired.get('active_bytes', 0)))}, "
                 f"limit={self._format_bytes(int(wired.get('limit_bytes', 0)))}, "
-                f"previous={self._format_bytes(int(wired.get('previous_limit_bytes', 0)))}, "
                 f"recommended={self._format_bytes(int(wired.get('recommended_bytes', 0)))}"
             )
         else:

@@ -191,9 +191,11 @@ class Qwen3ASRMLXArgs:
     # 这样可以在不破坏启动稳健性的前提下，优先使用用户已经准备好的 8bit 权重。
     model = ModelPaths.resolve_qwen3_asr_mlx_model()
 
-    # MLX 运行态开关只表达 server 的资源管理意图；具体预热音频、active memory
-    # 观测、wired limit 计算和 mlx.core.set_wired_limit 调用都在本地
-    # mlx-qwen3-asr package 的 QwenASRRunner 内完成，避免 server 外层复制 MLX 策略。
+    # False：不调用任何锁页/Metal额度接口，允许系统换出，接受久置后首次转录慢。
+    # True：由package对全部真实权重页mlock，保证存活期间不可换出；锁页失败拒绝
+    # 启动，不能静默降级。仅锁权重，不消除极端内存压力带来的整体推理变慢。
+    # wired_memory_limit是锁页预算上限，预热、预算计算与原生调用均由Runner负责。
+    # 修改开关后需要重启server；不会通过后台定时推理来维持常驻。
     enable_startup_prewarm = True
     enable_wired_memory = True
     wired_memory_limit = 'auto'
