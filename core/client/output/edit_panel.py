@@ -28,7 +28,8 @@ from typing import Callable, Optional
 try:
     from AppKit import (
         NSEvent, NSEventModifierFlagShift,
-        NSPanel, NSScrollView, NSTextView, NSFont, NSWindowStyleMaskBorderless,
+        NSPanel, NSView, NSScrollView, NSTextView, NSFont,
+        NSWindowStyleMaskBorderless,
         NSBackingStoreBuffered, NSFloatingWindowLevel,
         NSWindowCollectionBehaviorCanJoinAllSpaces,
         NSWindowCollectionBehaviorFullScreenAuxiliary,
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _PANEL_W = 680            # 面板宽（固定，只做高度自适应）
 _MARGIN = 10              # 文本框距面板边缘
+_CORNER_RADIUS = 12.0     # 面板圆角；裁剪容器与毛玻璃材质必须保持一致
 _MIN_TEXT_H = 42          # 单行时的文本框高
 _MAX_SCREEN_RATIO = 0.4   # 面板最高占屏幕可视高度的比例
 _PANEL_TOP_RATIO = 0.70   # 面板上边缘位于可视区高度 70%，水平居中、整体靠上
@@ -217,16 +219,29 @@ if _APPKIT_OK:
             self.panel.setReleasedWhenClosed_(False)
             self.panel.setDelegate_(self)
 
-            # 毛玻璃圆角底（popover 材质，随系统深浅色自适应）
+            # 透明圆角裁剪容器必须独立于 NSVisualEffectView。若直接把毛玻璃设为
+            # NSPanel 根内容视图，macOS 会让 visual-effect 的私有背板仍按矩形窗口
+            # 参与合成，仅设置 effect.layer.cornerRadius 会在四角露出白色矩形底。
+            # 外层容器建立第二道合成边界，保证材质、窗口底色和阴影都以同一个
+            # 圆角轮廓输出。
+            self.clip_view = NSView.alloc().initWithFrame_(
+                NSRect(NSPoint(0, 0), NSSize(_PANEL_W, _MIN_TEXT_H + 2 * _MARGIN)))
+            self.clip_view.setWantsLayer_(True)
+            self.clip_view.layer().setCornerRadius_(_CORNER_RADIUS)
+            self.clip_view.layer().setMasksToBounds_(True)
+            self.panel.setContentView_(self.clip_view)
+
+            # 毛玻璃圆角底（popover 材质，随系统深浅色自适应）。effect 自身也
+            # 保留圆角裁剪，避免其私有材质层在外层容器建立合成前短暂闪出直角。
             self.effect = NSVisualEffectView.alloc().initWithFrame_(
                 NSRect(NSPoint(0, 0), NSSize(_PANEL_W, _MIN_TEXT_H + 2 * _MARGIN)))
             self.effect.setMaterial_(NSVisualEffectMaterialPopover)
             self.effect.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
             self.effect.setState_(NSVisualEffectStateActive)
             self.effect.setWantsLayer_(True)
-            self.effect.layer().setCornerRadius_(12.0)
+            self.effect.layer().setCornerRadius_(_CORNER_RADIUS)
             self.effect.layer().setMasksToBounds_(True)
-            self.panel.setContentView_(self.effect)
+            self.clip_view.addSubview_(self.effect)
 
             # 多行纯文本编辑器：按宽度自动换行。高度受上限时，裸 NSTextView 会
             # 裁切超出的行且没有滚动视口，故由无边框 NSScrollView 承载；滚动条
@@ -365,6 +380,9 @@ if _APPKIT_OK:
                     content_h, screen.origin.y, screen.size.height)
                 self.panel.setFrame_display_(
                     NSRect(NSPoint(origin.x, y), NSSize(_PANEL_W, content_h)), True)
+                # NSPanel 会自动调整根内容视图，但其子级 effect 不会随窗口缩放；
+                # 每次高度变化后同步铺满裁剪容器，防止底部留下未覆盖的透明带。
+                self.effect.setFrame_(self.clip_view.bounds())
             except Exception:
                 logger.debug("[edit-panel] 高度自适应失败（忽略，维持当前尺寸）",
                              exc_info=True)

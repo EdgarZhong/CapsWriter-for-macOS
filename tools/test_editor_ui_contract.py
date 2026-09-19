@@ -89,6 +89,19 @@ def test_panel_grows_downward_from_fixed_top() -> None:
     assert short_y + short_h == screen_y + screen_h * top_ratio
 
 
+def test_panel_visual_effect_is_clipped_by_independent_rounded_container() -> None:
+    """毛玻璃根视图必须再包一层圆角裁剪，防止窗口四角露出矩形背板。"""
+    source = (
+        PROJECT_ROOT / 'core/client/output/edit_panel.py'
+    ).read_text(encoding='utf-8')
+    assert 'self.clip_view = NSView.alloc().initWithFrame_' in source
+    assert 'self.clip_view.layer().setCornerRadius_(_CORNER_RADIUS)' in source
+    assert 'self.clip_view.layer().setMasksToBounds_(True)' in source
+    assert 'self.panel.setContentView_(self.clip_view)' in source
+    assert 'self.clip_view.addSubview_(self.effect)' in source
+    assert 'self.effect.setFrame_(self.clip_view.bounds())' in source
+
+
 def test_self_target_guard() -> None:
     """自身 PID、bundle 或名称均不得覆盖上一个有效上屏目标，普通应用必须放行。"""
     assert _is_self_target({'pid': os.getpid(), 'bundle_id': 'com.example.editor', 'name': '编辑器'})
@@ -102,5 +115,6 @@ if __name__ == '__main__':
     test_hotkey_and_editor_commands()
     test_mark_menu_title()
     test_panel_grows_downward_from_fixed_top()
+    test_panel_visual_effect_is_clipped_by_independent_rounded_container()
     test_self_target_guard()
     print('PASS: editor UI contract')
