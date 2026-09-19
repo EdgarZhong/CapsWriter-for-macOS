@@ -1,5 +1,12 @@
 # CapsWriter-Offline 当前阶段同步
 
+## 2026-09-19：0.3.0 首次正式发布（main 与 tag 已推送）
+
+- 版本号口径（用户确认）：本 fork 尚未正式产品化，采用 0.x 编号；首个实际发布版本 **0.3.0**，tag `v0.3.0` 打在 main。0.1.0（2026-05-24 首个可用形态）与 0.2.0（2026-08-25）为事后补记的历史节点；上游 v0.2–v2.2 标签属 Windows 原版，与本 fork 编号无关。`config_client.py` 的 `__version__='2.5'` 是上游继承值，未动；fork 版本以 CHANGELOG/tag 为准。
+- 分支分工（用户确认）：main 为发布分支，`readme.md` 面向用户撰写；mac-dev 的 `readme.md` 遵守三份核心文档要求（含开发回归入口）。合并时 readme 必须手工迁移用户可见事实，禁止用 mac-dev 版覆盖。`CHANGELOG.md` 只维护在 main 根目录；`docs/CHANGELOG.md` 顶部已注明指向关系。
+- 已完成：子仓库 capswriter-macos 推至 `f745f5e`；mac-dev 推至 `26bb71b`；main 合并 mac-dev（38 提交）+ 用户向 readme + 根目录 CHANGELOG.md，合并提交 `5d4d617` 与 tag `v0.3.0` 已推送 origin；GitHub Issues 已用 `gh` 打开。
+- 下一步候选：GitHub Release 页面（基于 v0.3.0 tag）尚未创建，需要时再发。
+
 ## 2026-09-19：录音设备选择改为可配置（发布默认 default，本机 builtin）
 
 - 用户口径：发布到 main 的代码不得包含"优先 MacBook 内建麦克风"的个人逻辑；普适逻辑是快速选择系统当前默认录音设备。内建麦偏好属个人场景，保留为本机可选。

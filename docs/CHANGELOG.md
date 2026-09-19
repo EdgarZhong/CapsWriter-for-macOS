@@ -1,6 +1,8 @@
 # 更新日志
 
-## macOS 适配版 v1.0（2026-05-24）
+> **本 fork（macOS 适配版）的版本历史自 0.1.0 起维护在根目录 [`CHANGELOG.md`](../CHANGELOG.md)（发布于 main 分支）**，按 0.x 阶段编号。下方"macOS 适配版 v1.0"是早期内部草稿条目，对应正式编号的 0.1.0；更下方为 Windows 原版的历史更新记录。
+
+## macOS 适配版 v1.0（2026-05-24，现编号 0.1.0）
 
 > 本条目记录 [EdgarZhong/CapsWriter-Offline](https://github.com/EdgarZhong/CapsWriter-Offline) `mac-dev` 分支相对原版 v2.5 的 macOS 专项改动。
 
