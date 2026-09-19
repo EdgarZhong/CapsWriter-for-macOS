@@ -1,8 +1,34 @@
 # CapsWriter-Offline 当前阶段同步
 
-## 2026-09-19：本轮修复提交与推送（收尾，工作区已清空）
+## 2026-09-19：录音设备选择改为可配置（发布默认 default，本机 builtin）
 
-- 用户要求把两端 bug 修复提交推送并清空工作区；按主题拆 5 个提交：服务端调度、客户端麦克风、子模块指针、编辑框圆角、文档与忽略规则。分支 `mac-dev` 已推送，工作区无残留改动。
+- 用户口径：发布到 main 的代码不得包含"优先 MacBook 内建麦克风"的个人逻辑；普适逻辑是快速选择系统当前默认录音设备。内建麦偏好属个人场景，保留为本机可选。
+- 实施：`config_client.py` 新增 `macos_mic_device = 'default'`（发布默认）/`'builtin'`（个人）开关；`stream.py` 抽出 `_select_device_index()` 按配置分叉。`default` 模式每次开流前刷新设备表后跟随系统默认输入（刷新实测约 0.6ms，且为正确性必需：陈旧默认设备可能照样打开成功却录错麦，失败重试兜不住）；`builtin` 模式行为与此前一致（快速路径不刷新，找不到内建麦刷新重找、仍无回退默认）。
+- 本机偏好通过不入库的 `config_client_local.py`（已加 .gitignore）覆盖为 `'builtin'`，由 `config_client.py` 末尾 exec 加载；本机日常使用行为不变，发布合入 main 时两分支代码一致、行为只由配置区分。
+- 延迟评估结论（发布前用户要求核查）：9-19 提速来自 20ms 块 + low latency（首帧 138.73→105.48ms），与设备选择正交；设备打开中位前后仅 88.78→85.94ms。重新接入 default 逻辑不会回退开麦速度。实测设备表刷新（terminate+initialize）中位 0.6ms。
+- 验证：`tools/test_stream_stop_leak.py` 14 项（新增 default 模式刷新且跟随系统默认、builtin 缺失时刷新重找两个用例；原有用例显式 patch 配置，不受本机覆盖影响）、`tools/test_mic_shortcut_lifecycle.py` 9 项通过；独立进程真实设备表验证 default→None、builtin→index 0、非 macOS→None。
+- 文档同步：readme「录音启停与故障诊断」、`docs/macos-architecture-decisions.md` 第十节；下方 2026-08-12 条目标记为已被本轮取代。
+- 本轮未提交；待与 changelog、mlx 后端修复等一起按发布主题拆分提交。
+
+## 2026-09-19：服务端权重常驻修复（已加载，用户确认wired增量，待长期体验）
+
+- 用户再次确认：所有单次推理状态（请求上下文、KV cache、特征/激活等）均为任务临时资源，不论开关状态都不做跨任务保活；正常释放引用并由MLX/系统复用回收。False允许包括约2.46GB模型权重在内的全部普通页由系统按需压缩/换出，不主动强制换出或卸载模型，不承诺立即少占2.46GB；True仅锁真实权重页。用户已重启加载，将通过长期日常使用验收久置首句时延。
+- 修改前报告复核：`diagnogs/mem_profile/20260919/report.md`的footprint样本、推理峰值及90秒回落可作历史容量参考，未对修改后同组9条音频重测。其“vmmap wired列=2.3G”误读：原快照对应列为VIRTUAL/RESIDENT/DIRTY/SWAPPED/VOLATILE/NONVOL/EMPTY，根本无wired列（18:34只读核查同一旧worker 15332的完整表头）。Apple说明phys_footprint包含压缩/换出页，不能据其稳定证明永久物理驻留；全系统wired也不能直接归属给模型。故撤回报告“已永久常驻/100%物理驻留”的推论，不修改原始报告和采样。新mlock锁的是同一份权重，没有再复制约2.46GB；修改后精确峰值仍待重测。
+- 用户最终口径：单一`enable_wired_memory`开关。False完全不设置锁页/Metal额度，允许系统换出，接受长时间不用后的重新调页延迟；True要求全部权重长期不可换出。极端内存压力下的整体推理变慢可接受；此前其它修复未解决本问题。
+- 当前配置已核实：`config_server.py::Qwen3ASRMLXArgs`为prewarm=True、wired=True、limit=auto，模型1.7B-8bit。用户于18:36:53重启，现server PID 48279；18:36:55.208日志确认本地package及`weights locked: method=mlock, locked=2.29GiB, active=2.30GiB, limit=2.76GiB`，本轮修复已加载。
+- 根因口径修正：旧实现仅设置Metal额度，未验证空闲后的物理锁页；本机MLX 0.31.2提前设限+预热+收口+微型GPU提交后wired升约2.4GB，但10秒空闲即回落。源码支持已有buffer补入和降限移出，不能继续使用“不追溯/降限不撤pin”解释；仅改启动顺序不足。实验见`.archive/wired-fix-20260919/early-flush.jsonl`。
+- [x] package新增`LockedModelWeights`，通过原始memoryview字节视图对全部权重页mlock，不复制模型，兼容bf16。按页去重合并，保留引用至解锁，部分失败回滚；cleanup及finalizer对称释放。
+- [x] 开关关闭时不调用任何锁页/设限接口；开启但预算不足或原生锁页失败时明确拒绝引擎启动，禁止静默降级。预算沿用原auto/显式配置；不锁临时KV/cache，没有周期性保活推理。
+- [x] 新Runner回归旧实现3项失败；最终Runner/锁页/Session/正文前缀45项通过。覆盖原始地址、bf16、按页去重、预算不足、原生失败回滚、解锁重试、finalizer及开关两态；ruff、语法、主/子仓库diff检查通过。
+- [x] 正式Runner真实语音：锁2463236096字节（1104个参数，预算2963252712），空闲前0.402秒，连续300秒不调用MLX后首次转录0.458秒；正文一致、权重buffer地址未变。空闲后系统wired约5.16GB，保留模型引用cleanup后约2.74GB。证据`.archive/wired-fix-20260919-resume/runner-on-300s.jsonl`。
+- [x] 关闭模式60秒对照：不锁页，空闲时wired回到约2.84GB，正文/地址一致；没有制造换出压力，不能据此声称本轮复现了关闭模式的长时换入延迟。证据同目录`runner-off-60s.jsonl`。
+- [x] 正式`EngineFactory.create_asr_engine('qwen_asr_mlx')`验证当前True/auto配置透传、新package路径、mlock字节数及cleanup归零通过。实现及稳定入口已同步readme、现有架构规格、ASR总文档；诊断入口`tools/probe_qwen_residency.py`支持自行延长空闲时间。
+- 用户真机观察：重启前系统wired约2–3GB，加载修复后约4–5GB；增量与约2.46GB权重锁页一致，进一步支持旧报告错误地将全系统wired基线归因为模型权重的纠正。
+- 本轮修改未提交，日常服务已由用户重启加载。剩余验收：观察数小时日常空闲首次转录；已完成的独立进程5分钟测试不等同于数小时用户场景全部验收。mlock只保证权重页不可换出，不锁Python代码/tokenizer/动态缓存，也不消除系统调度和资源竞争开销。
+
+## 2026-09-19：此前修复提交与推送（18:04收尾时工作区已清空）
+
+- 用户要求把两端 bug 修复提交推送并清空工作区；按主题拆 5 个提交：服务端调度、客户端麦克风、子模块指针、编辑框圆角、文档与忽略规则。分支 `mac-dev` 已推送，当时工作区无残留改动。
 - 提交：`633814b`（服务端调度）、`29783ac`（客户端麦克风）、`72b7aa5`（子模块指针 25551b0→4247e58）、`92a7d46`（编辑框圆角）、本轮文档提交；此前未推送的 `be84e5e`（取证脚本）一并推送。
 - `diagnogs/` 取证数据（约 3.6G，含 9313 条 Windows 对照转写）按用户决定不入库；`.gitignore` 改为只保留 `serve_transcribe.py` / `serve_transcribe_resume.py` 两个脚本入库，其余全部忽略。
 - `mlx-qwen3-asr-upstream-pr/` 已移出本仓库到 `~/code/mlx-qwen3-asr-upstream-pr`（独立仓库，继续用于上游 PR）。
@@ -20,16 +46,6 @@
 - 继续核查Runner历史：用户记忆中的“约30秒录音内提前推理”与当前实现不一致。7月6日主仓库`76250e2`/子仓库`25551b0`已明确P0仅流式缓存、final调用Session，提前处理InferenceChunk尚未实现；当前仍如此。本轮队列修复不会自动实现录音内提前推理。重构前外层按60s+4s重叠缓存（68s触发），短句通常只提交一个工作单元；重构后逐包入队却保留20ms等待，50ms→20ms采集块是本次明显回归的触发条件。
 - 运行态只读核查：server/client分别于9月19日09:36:11/09:36:13启动，已加载此前两轮修改；本轮调度修复尚未加载。
 
-## 2026-09-19：服务端 wired 常驻修复（进行中）
-
-- 用户授权核查上一轮结论、实际服务配置并修复；保留其它工作区改动。
-- 已核对：`config_server.py::Qwen3ASRMLXArgs` 为 prewarm=True、wired=True、limit=auto，模型为1.7B-8bit；当时日常服务为9月18日15:49启动；9月19日本轮故障排查已核实用户随后重启，server现为09:36:11启动。
-- 新发现：Session构造即加载并eval权重，早于 `_startup_initialize_runtime`；仅修改该函数内部顺序不足。MLX 0.31.2源码支持已有buffer补入和降限移出，上一轮“不追溯/不会撤pin”不能作为普遍事实；正在补当前环境稳定测量。
-- [ ] 先完成独立进程旧/新顺序对照，记录系统wired、active和cache；不以API成功替代物理驻留证据。
-- [ ] `capswriter_runner.py` 在Session创建前设预算、加载/预热后按active收口；保留显式额度与关闭语义、启动失败恢复、cleanup原始预算。
-- [ ] 在现有Runner测试中覆盖加载前生效、收口和故障路径，先观察旧实现失败再验证修复。
-- [ ] 同步现有架构规格与稳定入口，运行定向测试、真实模型验证及代码复核。日常服务尚未重启，长期空闲效果单独验收。
-
 ## 2026-09-18 至 19：客户端麦克风启停优化（已实现，待日常复验）
 
 - 用户确认：保留短按切换大小写、长按才占用麦克风及现有 200ms 阈值；优化额外等待与正常松手后的关闭可靠性。本轮范围为客户端，不调整服务端推理。
@@ -40,7 +56,7 @@
 - [x] 回归与复核：用可控阻塞/异常验证流启停、并发松手和恢复边界，运行客户端相关现有测试；更新稳定文档入口。真机关闭偶发故障需单独复验，不以模拟测试宣称完全解决。
 - 工作区已有编辑框和服务端改动已随本轮一并提交；不重启日常客户端，完成代码验证后报告加载方式及残余风险。
 
-- 实现结果：macOS 20ms/low 延迟；内建设备正常路径不重载库，无内建时仍刷新默认输入；回调统计移到loop、回调外恢复、严格检查关闭错误码，关闭未完成不重开。控制器FIFO与退出保护、完整启动发布保护、每录音独立队列、取消语义及缓存漏块修复均已落地。
+- 实现结果：macOS 20ms/low 延迟；内建设备正常路径不重载库，无内建时仍刷新默认输入（2026-09-19 起改为按 `macos_mic_device` 配置分叉，见顶部最新条目）；回调统计移到loop、回调外恢复、严格检查关闭错误码，关闭未完成不重开。控制器FIFO与退出保护、完整启动发布保护、每录音独立队列、取消语义及缓存漏块修复均已落地。
 - 验证：22项客户端定向测试通过；跨阈值漏块、松手后状态复活两个回归用例在备份旧源码上均失败，新代码通过。现有编辑框结果流及UI契约通过，语法与diff检查通过。主会话按更新后的 requesting-code-review 亲自复核，未采信中断的独立审查结果。
 - 本机独立进程测量（各8次，非完整键盘/正式客户端路径）：开流请求→首帧中位138.73ms→105.48ms，约减少33ms；关闭中位117.67ms→144.43ms。代价是回调退出再释放多约27ms。原始记录 `diagnogs/mic_lifecycle/20260919-hardware-probe.json`；短时样本不能证明长期偶发卡死已消失。
 - 补充本机6次启停（首帧后保持0.05/0.25/1/10/0.3/0.1秒）全部确认原生关闭成功，close耗时134.77–147.30ms，记录 `diagnogs/mic_lifecycle/20260919-native-close-check.json`；此验证不等同于日常偶发故障已根治。故障暂停同时令菜单栏进入error，下一次成功开流恢复麦克风可用标记。
@@ -162,7 +178,7 @@ launchd
 | 信号处理 | SIGTERM：set_wakeup_fd + SigtermWatcher 守护线程（NSApp.run() C RunLoop 期间 Python signal handler 无法执行）→ _critical_cleanup() → os._exit(0)；SIGINT 双击确认 |
 | 流式识别策略 | 当前阶段**不**把“产品级流式识别 / 流式显示”作为优先目标。Qwen3-ASR 的 decoder 虽具备自回归逐 token 输出能力，但要做成稳定的端到端流式体验仍需额外的 chunking、稳定前缀/不稳定尾巴管理与中间结果提交策略；现阶段先聚焦最终结果精度 |
 | MLX 后端演进路线 | 当前 `qwen_asr_mlx` 只是一层最小适配，后续精度优化主路线改为：**fork `mlx-qwen3-asr`，接管中层推理编排**（prompt 组装、language/context 策略、generation config、chunking、aligner 接法），而非继续把 `Session.transcribe()` 作为黑盒 |
-| 模型常驻内存（权重 wiring）+ 启动预热 | **已敲定，待 editable package runner / 中层编排落地后实施**（2026-06-22）。解决 `qwen_asr_mlx` 偶发首次识别延迟极高（基本可确定是权重被 macOS 压缩/换出，再次推理需搬回物理内存）；**不**承诺解决"内存被别的程序激烈争用时推理变慢"：**不检测"模型是否还热"（RSS/瞬时压力/粘性压力全否决，系统内存管理是黑盒不可靠观测），改用 `mx.set_wired_limit` 把权重钉成 wired 常驻内存、不可换出**。配套**一次性启动预热**（付清 MLX kernel 编译，与开关无关，始终做）。wiring 做成 **server 可选项**（`Qwen3ASRMLXArgs`，默认开，文档写明可关，用户跑高占用软件时不该死赖内存），由 server 透传到 editable package；自适应按 `get_active_memory()` 定大小、卡 `cap*0.6` 双保险、不需 sudo、仅 macOS 15+。**具体 wired limit 计算、`mx.set_wired_limit` 调用和预热时机归 fork 的中层编排层，不在 CapsWriter 适配层**，避免重复搬迁。完整推理留痕见 `docs/macos-architecture-decisions.md` 第九节 |
+| 模型常驻内存 + 启动预热 | 2026-09-19已修正实现为实际权重页mlock，单一开关区分允许换出与强制常驻；失败不再假报成功。旧两阶段Metal预算方案不足以保证空闲驻留。验证进度见本文件本轮任务区；稳定规格见`docs/macos-architecture-decisions.md`第九节。 |
 | App 图标 | `.icns` 放 `assets/icon/app-icon.icns`（源）→ 拷入 bundle `Resources/` + `Info.plist` `CFBundleIconFile=app-icon` + 重签名；`build_launcher.sh` 每次构建自动同步。LSUIElement 不进 Dock，图标体现在 Finder / 简介 / 权限列表 |
 | 通知后端 | `osascript`（归属脚本编辑器=卷轴）→ 改 **`UNUserNotificationCenter`**（CapsWriter 身份）；裸跑无 bundle 时回退 osascript；调用前用 `bundleIdentifier()` 防 abort。**横幅图标破图问题已 park**（见 `docs/bug-report-notification-icon.md`） |
 | 键盘失败处理 | 见 `docs/macos-architecture-decisions.md` 第六节。**回调非阻塞铁律**（业务甩工作线程队列）；失败分类（timeout/丢keyUp=自救带预算，撤权/创建失败/RunLoop退出=fatal）；fatal 单路径=恢复 remap+通知+引导重授权后重启，**删 15s 静默循环**；撤权时主动 `CFRunLoopStop` |
@@ -209,7 +225,7 @@ launchd
 | **P3：后端推理精度调优** | 🟡 进行中 | 聚焦 `qwen_asr_mlx`：核对 8bit/4bit 模型选择、上下文/热词能力缺口、音频前处理与解码参数差异，评估是否需要补齐能力或回退默认规格。2026-07-05 已将 fork `git@github.com:EdgarZhong/mlx-qwen3-asr.git` 作为根目录子仓库 `mlx-qwen3-asr` 接入，分支固定为 `capswriter-macos`，`requirements-server.txt` 改为安装本地子仓库包。2026-07-06 P0 已落地：`mlx_qwen3_asr.capswriter_runner.QwenASRRunner` 成为 CapsWriter 和后续评测 driver 共用入口；`qwen_asr_mlx` server worker 按后端分叉，不再走旧 `WorkPipeline` 60s 分片拼接，而是把同一 `task_id` 的音频增量作为 `AudioFeedPatch` 喂给 package Runner；server 外层只保留模型目录解析、队列/传输、`language/context` 请求元信息。验证：本地导入路径已指向 `/Users/edgar/programs/CapsWriter-Offline/mlx-qwen3-asr/mlx_qwen3_asr/__init__.py`；真实 1.7B-8bit 模型最小链路输出 `The quick brown fox jumps over the lazy dog.`。 |
 | **ASR 评测脚手架** | 🟢 v1 源数据已备齐，待构建 manifest/driver | 2026-07-05 创建 `evals/` 根目录，约定 `datasets/`、`drivers/`、`results/`、`manual_cases/` 四类材料边界。2026-07-06 新增 `evals/datasets/capswriter_tech_asr_v1/download_sources.py` 和数据集 README，口径改为只下载 v1 所需最小源文件/单 shard，不拉公开数据集全量；`sources/raw/tmp` 已加入 Git 忽略，避免大文件误提交。已下载：`Tech-Sentences-For-ASR-Training` 205 条音频/文本、`Chinese-LiPS processed_val.zip` 约 521MiB、`TED-LIUM3 test` 单 parquet 约 287MiB、`Earnings-22 chunked` 单 parquet 约 368MiB。2026-07-08 用户 HF 访问申请已通过，并在 token 设置中开启 fine-grained token 的 public gated repo read 权限；已补齐 `AISHELL6-Whisper` 的 `AISHELL6-Whisper_info.csv`、`text_sentence`、`w2n.txt`、`metadata.tar.gz`、`test.tar.gz`（约 1.7GiB），下载状态 `complete` 且失败项为空。下载中 Hugging Face Xet 曾在大文件阶段长时间停滞，最终使用 `HF_HUB_DISABLE_XET=1` 完成核心音频包下载。2026-07-06 用户确认：中文真实低语对 v1 很关键；不使用来源不可审计、绕过审批或疑似泄露的数据包，避免污染评测基准授权与复现口径。已收敛语义：`AudioMessage` 是客户端到服务端的协议消息；`task_id` 是一次完整录音/文件转写的完整识别任务标识，等价于 record session / recognition session；服务端 worker 执行单元已统一改名为 `Work`；`AudioFeedPatch` 是 Qwen3-ASR 新路径中 server/worker 按时序喂给 package runner 的内部音频增量；`InferenceChunk` 是 runner 内部真正送入模型的约 30 秒级推理单位。评测主驱动必须接 CapsWriter 服务端后端路径；runner 落地后必须以同一个 `task_id` 调用 package runner，禁止用 `mlx_qwen3_asr.transcribe()` 裸 API 作为主评测结果来源。 |
 | **CapsWriter 技术口述 Golden Set** | 📝 待建立 | 2026-07-05 口径收敛并已写入 `docs/ASR调优总文档.md`：评测集只优先覆盖中英文技术口述场景，低语/小声说话必须作为高占比核心条件，而不是少量鲁棒性附加项。原因是便携电脑端用户经常在办公室、会议室、公共空间中压低音量使用，收音条件天然不理想。用户明确不希望自录数据集，后续优先采用公开数据集、固定抽样、可复现增强和必要的公开 TTS/合成样本。评测矩阵按两个正交维度组织：内容场景（中文技术讲解、英文技术词汇、商业/技术会议、命令式口述、中英混合术语）× 声学条件（正常音量、小声说话、真实低语、低增益增强、噪声/混响/远场）。真实低语与简单降音量增强必须分开标注。当前阶段不改产品预处理链路，不新增响度归一化、AGC 或降噪；评测目标是在现有录音、重采样、log-mel 管线下观察模型与接入策略的真实表现。 |
-| **权重 wiring + 启动预热** | ✅ 代码+真实初始化验证 | 2026-07-06 落地到 `mlx-qwen3-asr` package 内 `QwenASRRunner`：server 只在 `Qwen3ASRMLXArgs` 传 `enable_startup_prewarm=True`、`enable_wired_memory=True`、`wired_memory_limit='auto'`；Runner 初始化时先用 1s 静音走真实 `Session.transcribe()` 预热，再按预热后的 `mx.get_active_memory()` 自动计算 wired limit 并调用 `mx.set_wired_limit()`。验证：真实 `EngineFactory.create_asr_engine('qwen_asr_mlx')` 初始化通过，package path 指向本地子仓库；prewarm `cost_sec=0.567s`；wired active `2469377260 bytes`，limit `2963252712 bytes`（约 2.76GiB），previous `0`。失败只记录 warning，不阻断 server 启动；cleanup 尝试恢复旧 wired limit。 |
+| **权重常驻 + 启动预热** | 🟡 已加载，待长期日常验收 | 9月19日改用mlock锁实际权重页；45项定向测试、正式工厂入口及5分钟空闲对照通过。用户已重启并确认wired增量，长时用户场景验收见本轮任务区。 |
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |
 | FFmpeg 路径确认 | ✅ 2026-08-14 已修复+实测 | 根因：launchd 默认 PATH 是最小集（`/usr/bin:/bin:/usr/sbin:/sbin`），不含 Homebrew 的 ffmpeg → `AudioFileManager` 靠 `shutil.which('ffmpeg')` 判定，PATH 无 ffmpeg 时静默降级存 WAV（体积约为 192k MP3 的 5~6 倍）。修法：`capswriter.py:_build_client_plist()` 给 client plist 加 `EnvironmentVariables PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`；`uninstall→install` 重写 plist 生效。实测：新 client 进程 PATH 含 ffmpeg，`shutil.which` 命中 `/opt/homebrew/bin/ffmpeg`，新录音 ffprobe 验证为真 MP3（codec=mp3，~195kbps，48k/单声道）。TCC 权限不受影响（未重签 launcher）。 |
@@ -238,7 +254,7 @@ launchd
 | P0 | ✅ fork `mlx-qwen3-asr` 已作为根目录子仓库接入，主仓库跟踪 fork 内 `capswriter-macos` 分支；2026-07-06 已补服务端导入路径保险，worker 启动 `qwen_asr_mlx` 时优先加载根目录子仓库源码，实测 package path 为 `/Users/edgar/programs/CapsWriter-Offline/mlx-qwen3-asr/mlx_qwen3_asr/__init__.py`。 |
 | P0 | 在正式 ASR 评测前完成配置归属收敛：所有影响 ASR 输出的推理参数集中到 editable `mlx-qwen3-asr` package 内；CapsWriter server 外层只保留传输、队列/调度、后端选择、模型目录解析、用户请求元信息，以及权重常驻/预热这类运行开关或资源预算的透传；server 不负责 generation、prompt、chunking、aligner、wired limit 计算和 MLX 底层调用 |
 | P0 | 🟡 第一轮后端调优执行清单：①✅确认 editable / 等价源码加载；②✅增加导入路径检查；③✅在子仓库内提供 CapsWriter 专用 `QwenASRRunner`，而不是裸用 `Session.transcribe()`；④✅server 已接同一 runner，评测 driver 待接；⑤✅统一语义：`task_id` 是完整识别任务标识，不再额外引入 `RecordSession` 层级；⑥✅`qwen_asr_mlx` 按后端分叉，不走旧 `WorkPipeline` 片段拼接，而是把同一 `task_id` 的 `AudioFeedPatch` 按时序 feed 给 runner；⑦🟡runner 当前已支持 package-owned“流式喂音频 + final 离线完整结果”，但尚未实现录音过程中提前处理稳定 `InferenceChunk`；⑧✅其它模型保留现有 60s 分段 + 4s overlap 的旧 Server `Work` 路径；⑨后续只比较 8bit/4bit、auto/forced language、no context/tech context、`max_new_tokens` 截断观测；暂不碰 temperature、draft model、diarization、timestamps、streaming、AGC/EQ/降噪 |
-| P0（依赖上一行） | editable 源码加载和 `QwenASRRunner` / 中层编排落地后，在 package 内实施**权重 wiring（`mx.set_wired_limit`）+ 一次性启动预热**；wiring 做成 server 可选项（`Qwen3ASRMLXArgs`，默认开，README 写明可关），由 server 透传到 editable package；具体 wired limit 计算、`mx.set_wired_limit` 调用、预热时机和 MLX 细节全部在 package 内完成。方案见 `docs/macos-architecture-decisions.md` 第九节 |
+| P0 | 权重常驻开关已接入；9月19日改为mlock锁真实权重页，已完成定向验证及文档同步，已日常加载，待更长空闲验收。稳定规格见`docs/macos-architecture-decisions.md`第九节。 |
 | P0 | 复核并补齐 `qwen_asr_mlx` 当前缺失能力：服务端热词、解码参数、chunking 策略、aligner 接法 |
 | P0 | ✅ 已修复 `Caps` 长按竞态（见看板任务 E）：覆盖“开流已开始但 `task.is_recording` 尚未置真时松手”的 stop 丢失场景，麦克风流必定被关闭。**待真机运行时复验** |
 | P1 | 评估默认模型策略是否仍应保持“macOS 优先 8bit”，或改为可配置优先级 / 按机器回退 4bit |
@@ -279,6 +295,8 @@ launchd
 - 代价：每次开流前多一次 PortAudio 重载（几十毫秒量级）。用户实测确认录音成功，**延迟问题暂不优化**（可等菜单栏麦克风胶囊出现后再开口）。
 
 ### 2026-08-12：临时推翻「跟随默认输入」口径，固定用 Mac 内建麦克风（用户拍板）
+
+> **已被 2026-09-19「录音设备选择改为可配置」取代**：内建麦优先改为 `macos_mic_device = 'builtin'` 可选项（本机经 config_client_local.py 启用），发布默认恢复为跟随系统默认输入。
 
 - 背景：`dfc50a1` 后开流跟随系统默认输入设备，但用户**经常戴耳机**，耳机麦克风收音差，默认输入被 macOS 自动切到耳机麦 → 希望固定使用本机内建麦克风。**临时策略**，后续可能再调整。
 - 改法（未提交）：`core/client/audio/stream.py` 新增 `_find_builtin_mic()`（按设备名匹配内建麦克风：`内建` / `Built-in` / 含 `麦克风|Microphone` 且含 `MacBook`），`start()` 中 macOS 下优先用它指定的设备索引开流，找不到内建麦时回退 `device=None` 跟随默认；**保留 `_reload_portaudio()`**（刷新设备列表本身无害，且保证插拔后索引变化仍能找到内建麦）；Windows 等其他平台不受影响。控制台/日志打印「使用内建麦克风」。

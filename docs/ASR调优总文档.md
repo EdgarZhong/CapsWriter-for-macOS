@@ -719,7 +719,7 @@ Server 侧：
 - ✅ 2026-07-06 runner 已落地，`qwen_asr_mlx` 主路径以 `AudioFeedPatch` 按时序 feed 同一个 `task_id` 的 package runner；当前 P0 先实现“流式喂音频 + final 离线完整结果”，尚未实现录音过程中提前处理稳定 `InferenceChunk`。
 - ✅ 已完成语义收敛：`task_id` 是完整识别任务标识；服务端 worker 执行单元已经统一改名为 `Work`，不再复用 `Task` 表达完整任务语义。
 - ✅ 已把当前 `return_timestamps`、`return_chunks`、`max_new_tokens`、`num_draft_tokens`、`verbose` 等推理级入口集中到 `mlx-qwen3-asr` 包内 `CapsWriterRunnerConfig`，避免 CapsWriter 外层和包内两套配置同时生效。
-- ✅ 2026-07-06 已把启动预热和 MLX wired memory 落到 package Runner 内：server 默认开启 `enable_startup_prewarm`、`enable_wired_memory`，并以 `wired_memory_limit='auto'` 透传运行意图；Runner 负责预热、读取 active memory、计算 wired limit、调用 `mx.set_wired_limit()` 和记录初始化结果。
+- 2026-07-06 接入的启动预热与`set_wired_limit`只验证了API调用，未证明长期驻留。2026-09-19修正为package对全部真实权重buffer执行`mlock`，常驻开关关闭时不调用任何锁页/Metal额度接口；开启却锁页失败时拒绝启动，具体生命周期及真机验证入口见`docs/macos-architecture-decisions.md`第九节。
 - 保留 CapsWriter 外层的最小产品配置入口，避免破坏多后端工厂结构。
 
 完成这一步之后，再开始固定 manifest 的正式基线评测。

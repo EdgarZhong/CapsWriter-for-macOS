@@ -180,7 +180,7 @@ capswriter uninstall # 取消自启
 
 ### 录音启停与故障诊断
 
-macOS 默认在长按达到 200ms 后按需打开内建麦克风，松手请求关闭；无内建麦克风时回退到系统默认输入。采集采用 20ms 音频块和低延迟模式，空闲不预先占用麦克风。
+macOS 默认在长按达到 200ms 后按需打开麦克风，松手请求关闭。录音设备由 `config_client.py` 的 `macos_mic_device` 选择：`'default'`（默认）跟随系统当前默认输入设备；`'builtin'` 优先使用 Mac 内建麦克风（适合常戴耳机、避免默认输入被耳机麦接管的场景），找不到内建麦时回退默认输入。采集采用 20ms 音频块和低延迟模式，空闲不预先占用麦克风。
 
 若底层关闭超过 1 秒或返回错误，客户端会提示并暂停新录音，避免在未释放的流上反复开流或重载音频库。后台关闭稍后成功可恢复录音；持续失败时请从菜单栏重启 CapsWriter。超时提示不等于系统已释放麦克风。
 
@@ -237,11 +237,22 @@ Qwen3-ASR   | 千问ASR
 capswriter restart
 ```
 
+## 模型权重常驻开关
+
+`config_server.py`中的`Qwen3ASRMLXArgs.enable_wired_memory`控制两种行为，修改后重启server生效：
+
+- `False`：不设置任何锁页或Metal额度，允许系统换出；长时间不用后首次转录可能较慢。
+- `True`（默认）：对全部模型权重页执行`mlock`，空闲期间也保持物理驻留。预算不足或锁页失败会报错，避免假报常驻成功；极端内存压力造成的整体推理变慢仍可能发生。
+
+`wired_memory_limit='auto'`是权重锁页预算上限，实际只锁模型权重（本机1.7B-8bit约2.46GB）。启动预热独立开启，没有周期性后台推理。实现及验收口径见[常驻内存与启动预热](docs/macos-architecture-decisions.md#九模型常驻内存与启动预热)。
+
+可复现检查：`PYTHONPATH=mlx-qwen3-asr .venv/bin/python -m pytest mlx-qwen3-asr/tests/test_capswriter_runner.py mlx-qwen3-asr/tests/test_wired_memory.py -q`。真机独立进程检查：`.venv/bin/python tools/probe_qwen_residency.py --mode on --idle-seconds 1800`；关闭模式改为`--mode off`，两者顺序运行，不重启日常服务。
+
 ## 关键文档
 
 | 文档 | 路径 | 内容 |
 |------|------|------|
-| macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、麦克风启停与推理后端核心决策 |
+| macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、麦克风启停、权重常驻开关与推理后端核心决策 |
 | Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
 | ASR 调优总文档 | `docs/ASR调优总文档.md` | ASR 默认值、回归排查证据、Worker延迟/顺序调度、语言前缀修复与回退方式、评测入口 |
 
@@ -266,7 +277,7 @@ Worker对同一连接的音频包与结束标记保持FIFO、跨连接轮转；�
 | 项目 | 原版（Windows） | 本 fork（macOS） |
 |------|----------------|-----------------|
 | 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
-| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与 MLX wired memory 常驻额度 |
+| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与模型权重物理锁页（mlock） |
 | 自动语言转写 | 依后端实现 | Qwen MLX Runner 默认预置正文前缀以改善中英混说；显式语言优先；自动模式语言元数据为 unknown，时间戳/说话人对齐仍保留语言识别入口 |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
