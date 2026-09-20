@@ -198,6 +198,7 @@ evals/datasets/**/tmp/
 .agent
 # 本机个人配置覆盖（如 macos_mic_device='builtin'），不随发布入库
 config_client_local.py
+config_server_local.py
 
 diag*.py
 test_*.py 
@@ -242,3 +243,11 @@ diagnogs/*
 !diagnogs/serve_transcribe_resume.py
 
 .superpowers/
+
+# Swift 原生客户端本地产物（.build-* 为子 agent 并行构建目录，同样不入库）
+native/**/.build/
+native/**/.build-*/
+native/**/.swiftpm/
+
+# 运行时锁文件不入库
+**/.history.lock

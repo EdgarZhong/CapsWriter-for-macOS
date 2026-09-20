@@ -97,6 +97,11 @@ class AnnotationService:
             'kind': case.get('kind'),
             'audio_file': None,
         }
+        # 历史修订额外保留来源与稳定关联键；不把旧日记输出冒充原始 ASR。
+        # 既有编辑框调用不传这些字段，因此其 v2 格式和行为保持不变。
+        for field in ('history_id', 'history_source', 'history_source_text'):
+            if field in case:
+                entry[field] = case[field]
         try:
             with self._lock:
                 if audio_src is not None and Path(audio_src).exists():

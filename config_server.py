@@ -217,3 +217,15 @@ class ForceAlignerGGUFArgs:
     # 对齐细节
     n_ctx = 3072                # 上下文窗口大小
     dml_pad_to = 30             # 开启 DirectML 加速时，短音频统一填充到指定长度，有加速效果
+
+
+# 本地个人配置覆盖（可选，不入库，对应 .gitignore 的 config_server_local.py）：
+# 与 config_client.py 末尾的机制等价，用于保存与发布默认值不同的本机偏好，
+# 例如 `ServerConfig.log_level = 'INFO'`；Dashboard 设置页保存时也写入该文件。
+# 在本模块导入末尾执行，保证任何使用方拿到的都是覆盖后的最终值。
+_local_config_path = Path(BASE_DIR) / 'config_server_local.py'
+if _local_config_path.exists():
+    exec(  # noqa: S102 - 有意执行本机用户自己的配置文件
+        compile(_local_config_path.read_text(encoding='utf-8'), str(_local_config_path), 'exec'),
+        {'ServerConfig': ServerConfig, 'Qwen3ASRMLXArgs': Qwen3ASRMLXArgs},
+    )
