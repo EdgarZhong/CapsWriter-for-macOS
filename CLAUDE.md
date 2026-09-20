@@ -25,7 +25,7 @@
 - 推理方案以列表展示，顶部刷新重新检测资源；缺模型或运行时时提供下载，打开资源目录独立常驻。两个方案已确认为 Qwen3-ASR 1.7B-8bit 与 1.7B-4bit。
 - 视觉继续收敛：撤掉手工键帽与装饰声纹，改用大号简洁 Caps Lock 图标和紧凑状态入口；外观只保留右上角自动/浅色/深色三段控件。
 
-- 窗口材质分层（整窗磨砂半透明、三层结构、标题栏滚动渐隐）需求已收敛为专项规格：[Dashboard 窗口材质分层规格](docs/dashboard-窗口材质分层规格.md)。该规格为唯一口径，含明确禁止项与可执行验收标准；实现待后续按规格进行。
+- 窗口材质分层规格已重写为纯视觉口径（只描述「长什么样」，不含技术选型）：[Dashboard 窗口材质分层规格](docs/dashboard-窗口材质分层规格.md)。该规格为唯一视觉口径；当前实现与规格的差距见「本轮执行状态」。
 
 
 - 视觉方向：原生 macOS 26 Liquid Glass，磨砂半透明侧栏；复用 `assets/icon/app-icon` 素材；支持跟随系统、浅色、深色并持久化外观选择。
@@ -49,7 +49,14 @@
 
 - 文档整理完成：用户 `readme.md` 与 main 发布版本逐字对齐；补齐 `README.dev.md` 开发说明；历史流水已备份至 `.archive/` 并移出看板。
 - 当前实现：`native/CapsWriter` 提供五页原生导航（概览/设置/词库/推理方案/转录历史）、真实状态概览、现有 App Icon、持久化外观切换；设置页经 `tools/dashboard_settings.py` 读写 `config_client_local.py`/`config_server_local.py`（白名单+备份），词库页经 `tools/dashboard_vocabulary.py` 管理 hot.txt/hot-rule.txt/hot-server.txt，转录历史经 `tools/dashboard_history.py` 检索最近 200 条并把修订追加进 eval v2；`tools/build_dashboard.sh` 生成独立开发 App。
-- 已知未完成：窗口材质分层（整窗磨砂半透明三层结构）按 `docs/dashboard-窗口材质分层规格.md` 实施，当前 `Appearance.swift` 的分层代码实测有浅色模式白色残块且未透光，需按规格重做或回退；设置/词库/历史三页仅完成实机渲染检查，交互细节未逐项验收。
+- **材质分层交接（2026-09-20，工作区有未提交改动，仅涉及 `Appearance.swift` 与 `CapsWriterDashboard.swift`，当前可编译）**：
+  - 架构基线（已确认有效，勿动）：透明 NSWindow（`titlebarAppearsTransparent` + `fullSizeContentView` + `isOpaque=false` + `clear` 背景，在 `WindowConfiguratorHostView.viewDidMoveToWindow` 设置）+ 根 ZStack 最底层 `DashboardGlassBackground`（`.behindWindow` 磨砂背板）+ 清空 window/toolbar 容器背景。侧栏顶部已去图标、软件名大号粗体。
+  - 背板材质 `.popover → .sidebar`：用户确认「背板换成了正确效果」。
+  - 侧栏「挖孔」尝试（`DashboardGlassBackdropView` 用 `maskImage` 开孔 + 侧栏铺 `.popover`）：**失败，侧栏反而更不透明**；且侧栏列顶部多出约一个标题栏高度的实心亮带。建议直接回退挖孔相关改动（`DashboardGlassBackdropView`、holeWidth、`SidebarWidthKey`、侧栏 background），回到「侧栏 `Color.clear` 或原生玻璃」再重新诊断。
+  - 顶栏渐进模糊层（规格第 2 层）：**从未成功，当前完全缺失**。已失败两条路径：① SwiftUI 根 ZStack 挂 `NSVisualEffectView(.titlebar, .withinWindow)` + CALayer mask（完全无效果）；② AppKit contentView 顶层 overlay + `maskImage`（只见实心带、无模糊）。两条路径的代码均已删除。
+  - 待解决（按优先级）：A. 去除侧栏列顶部实心亮带（来源未查明，候选：NavigationSplitView 侧栏列在标题栏区域的系统材质叠加）；B. 实现规格第 2 层顶栏渐进模糊；C. 恢复侧栏比背板更透的关系。验收口径见规格文档第五节。
+  - 硬约束：禁止在用户桌面创建全屏/大面积背板窗口做采样测试（详见 AGENTS.md）；验收只许窗口截图或 alpha 分析。
+
 - 后续：接入模型首次下载/本地导入的完整引导，推进原生客户端迁移与完整 DMG。当前开发包不含 Python/ASR，不能作为完整产品交付。
 - 验证：5 组 Swift 状态兼容检查、窗口编译与开发包签名校验通过；实机检查四页导航、真实状态显示与浅色/深色切换。减少透明度和 macOS 13–25 回退仅完成代码接入，未实机验收。其余页面操作、原生听写迁移、完整 DMG 和用户验收未完成。
 - 资源修正：`models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit/` 此前混入 4bit 仓库的 `config.json` 与 `README.md`（权重文件本身即官方 8bit），已按官方 8bit 仓库替换并补齐 `model.safetensors.index.json`；旧文件备份于 `.archive/qwen3-asr-8bit-metadata-20260920-110246/`，Dashboard 资源不一致警告已消除。
