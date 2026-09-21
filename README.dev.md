@@ -78,7 +78,7 @@ bash build_launcher.sh
 | Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
 | ASR 调优总文档 | `docs/ASR调优总文档.md` | ASR 默认值、回归排查证据、Worker延迟/顺序调度、语言前缀修复与回退方式、评测入口 |
 | 语音输入 Roadmap 与桌面助手设计 | `docs/语音输入roadmap与桌面助手设计.md` | 产品化范围、热词服务化与已知算法问题、后续 ASR/桌面助手路线、暂缓实施的灵动岛设想与 Golden Set 评测方案 |
-| Dashboard 窗口材质分层规格 | `docs/dashboard-窗口材质分层规格.md` | 整窗磨砂半透明三层结构（背板/标题栏渐隐/侧栏玻璃）的需求口径、禁止项、技术线索与可执行验收标准；实现待按规格进行 |
+| Dashboard 窗口材质分层规格 | `docs/dashboard-窗口材质分层规格.md` | 整窗磨砂半透明三层结构（背板/顶栏渐进模糊/侧栏玻璃）的纯视觉口径、禁止项与逐项目视验收标准 |
 
 ---
 
@@ -121,7 +121,7 @@ Worker对同一连接的音频包与结束标记保持FIFO、跨连接轮转；�
 
 ## 原生 Dashboard 开发入口
 
-`native/CapsWriter` 是独立 Swift package，最低 macOS 13，使用系统 Swift 工具链；当前提供四页导航和读取现有客户端快照的概览。设置页已提供持久化的跟随系统／浅色／深色外观选择；听写设置、词库与模型管理尚未接入操作，不代表原生客户端迁移完成。macOS 26 使用系统玻璃导航与控件，旧系统回退系统材质，并尊重减少透明度设置。
+`native/CapsWriter` 是独立 Swift package，最低 macOS 13，使用系统 Swift 工具链；提供概览、设置、词库、推理方案与转录历史五页导航。概览读取现有客户端快照；设置、词库与历史修订通过 `tools/dashboard_*.py` 桥接现有文件；推理方案提供资源检查和准备入口。右上角提供持久化的跟随系统／浅色／深色外观选择。界面代码包含系统材质与减少透明度回退；视觉验收、页面交互及原生客户端迁移的当前进度统一见 `CLAUDE.md`。
 
 ```bash
 # 无 XCTest 依赖的合成状态兼容检查，不读写真实用户状态。
@@ -130,7 +130,9 @@ swift run --package-path native/CapsWriter DashboardCoreChecks
 bash tools/build_dashboard.sh
 ```
 
-产物位于 `build/CapsWriterDashboard.app`，使用独立开发 Bundle ID。当前只读 `~/.capswriter/state/status.json`，不监听快捷键、不占用麦克风。开发签名不等同于分发签名或公证；此包没有捆绑 Python/ASR，不是完整 DMG 产品。
+Dashboard 当前固定开发工具链基线：Command Line Tools for Xcode 26.6、Swift/SwiftPM 6.3.x、macOS SDK 26.5、最低部署目标 macOS 13。不要使用 CLT 27 / Swift 6.4 作为当前 Dashboard 构建基线；工具链迁移需要单独完成验证。构建前应让 `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，不要用临时 `SDKROOT`、`DEVELOPER_DIR` 或 `TOOLCHAINS` 覆盖基线。
+
+产物位于 `build/CapsWriterDashboard.app`，使用独立开发 Bundle ID。概览读取 `~/.capswriter/state/status.json`；设置保存、词库修改与历史修订由各页面的显式操作触发并经过 Python 桥接。Dashboard 不监听快捷键、不占用麦克风。开发签名不等同于分发签名或公证；此包没有捆绑 Python/ASR，不是完整 DMG 产品。
 
 ## 版本与分支
 

@@ -16,17 +16,6 @@ enum DashboardAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// 由系统负责采样壁纸与混合；减少透明度时使用不透明背景。
-struct SidebarMaterial: NSViewRepresentable {
-    var opaque: Bool
-    func makeNSView(context: Context) -> NSVisualEffectView { NSVisualEffectView() }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        view.material = opaque ? .windowBackground : .sidebar
-        view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
-    }
-}
-
 /// 玻璃只用于小型操作控件，正文保持稳定表面，避免层层透叠。
 struct ControlGlass: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -55,64 +44,102 @@ struct BrandIcon: View {
     }
 }
 
-/// 整窗材质分层（从下到上，恰好三层，口径见 docs/dashboard-窗口材质分层规格.md）：
-/// 1. 背板：DashboardGlassBackground 位于 SwiftUI 根 ZStack 最底层，铺满整窗；
-/// 2. 标题栏：系统层，红绿灯、窗口标题与外观切换都在这一层里，不再叠加自绘渐变带；
-///    滚动渐隐由系统 scrollEdgeEffectStyle 完成（见 DashboardView），不自绘第二层；
-/// 3. 侧栏：macOS 26 用 NavigationSplitView 原生玻璃，不再叠加自定义材质；
-///    13–25 回退用 SidebarMaterial，允许比 26 略实。
-///
-/// 架构口径：NSWindow 是透明合成容器（isOpaque = false + clear 背景），它只负责
-/// 「允许透出」；真正的磨砂由 SwiftUI 根层级里的 NSVisualEffectView(.popover,
-/// .behindWindow) 提供。此前把材质插到 window.contentView 最底层的做法会被
-/// SwiftUI 各容器自身的不透明背景完整遮住，永不透光，已废弃。
-
-/// 只配置窗口，不创建任何视觉效果视图。窗口配置必须在 viewDidMoveToWindow 里做：
-/// 异步等 window 的做法会静默失败，配置根本没生效。
+/// 窗口保留透明合成基线；顶栏滤镜由 ProgressiveTitlebarBackdrop 安装到窗口 frame 层级。
 struct WindowConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> WindowConfiguratorHostView { WindowConfiguratorHostView() }
-    func updateNSView(_ view: WindowConfiguratorHostView, context: Context) {}
+    func updateNSView(_ view: WindowConfiguratorHostView, context: Context) { view.configureWindow() }
 }
 
 final class WindowConfiguratorHostView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        configureWindow()
+    }
+
+    func configureWindow() {
         guard let window else { return }
-        // 顶栏并入内容区：滚动内容才能延伸到标题栏下方，渐隐层才有东西可盖。
+        // fullSizeContentView 使正文进入标题栏下方，原生 scroll edge 才有可采样的内容。
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        // 透明窗口 + 根层磨砂材质 + 各级容器背景清空，三者缺一不可：
-        // 只开透明而不清容器背景，就是之前标题栏白色残块的成因。
         window.isOpaque = false
         window.backgroundColor = .clear
-        // 系统窗口圆角与阴影保持默认，不自行绘制窗口 mask。
+        // 关闭硬分隔而保留系统控件；不再注入失效的 Core Image sibling overlay。
+        window.titlebarSeparatorStyle = .none
     }
 }
 
-/// 真正的窗口磨砂背板：必须是 SwiftUI hierarchy 根 ZStack 的最底层，
-/// 而不是 AppKit hosting view 外部的 sibling/backdrop。
-/// 材质固定 .popover + .behindWindow + .active，本轮不再做材质选型实验。
-struct DashboardGlassBackground: NSViewRepresentable {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    func makeNSView(context: Context) -> NSVisualEffectView { NSVisualEffectView() }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        // 减少透明度时退回窗口内实色填充，保证文字对比度。
-        view.material = reduceTransparency ? .windowBackground : .popover
-        view.blendingMode = reduceTransparency ? .withinWindow : .behindWindow
-        view.state = .active
-    }
-}
+/// macOS 15+ 用 SwiftUI 官方 toolbar 默认项控制视觉标题；旧系统只保留原生
+/// titleVisibility 回退，不改动 WindowGroup 的语义标题字符串。
+struct DashboardWindowTitle: ViewModifier {
+    let showTitle: Bool
 
-/// 滚动渐隐（第二层职责）：macOS 26 起系统对滚到标题栏/工具栏下方的内容自动做柔和
-/// 模糊渐隐（WWDC25 Session 323），只需声明 .soft；不要自绘渐变层再造第二条厚带。
-/// 13–25 无此 API，回退为无渐隐的单层滚动区（规格允许的降级）。
-struct SoftScrollEdge: ViewModifier {
+    @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectStyle(.soft, for: .top)
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: showTitle ? nil : .title)
+        } else {
+            content.background(LegacyWindowTitleConfigurator(showTitle: showTitle))
+        }
+    }
+}
+
+/// 删除 NavigationSplitView 自动生成的 sidebar toggle，统一交给业务绑定按钮控制。
+struct DashboardSidebarToggleRemoval: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .sidebarToggle)
         } else {
             content
         }
+    }
+}
+
+private struct LegacyWindowTitleConfigurator: NSViewRepresentable {
+    let showTitle: Bool
+
+    func makeNSView(context: Context) -> LegacyWindowTitleView { LegacyWindowTitleView() }
+
+    func updateNSView(_ view: LegacyWindowTitleView, context: Context) {
+        view.showTitle = showTitle
+        view.configure()
+    }
+}
+
+private final class LegacyWindowTitleView: NSView {
+    var showTitle = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configure()
+    }
+
+    func configure() {
+        // macOS 13–14 没有 toolbar(removing: .title)；这里只控制系统标题可见性，
+        // 保留 WindowGroup 的语义标题和窗口菜单名称。
+        window?.titleVisibility = showTitle ? .visible : .hidden
+    }
+}
+
+/// 业务层按视觉元素命名，AppKit 材质枚举只是底层映射，不能作为组件职责名。
+enum DashboardSurfaceStyle {
+    /// 用户已确认这款背板观感；系统恰好将它命名为 sidebar，不代表背板属于侧栏。
+    static let backdropMaterial: NSVisualEffectView.Material = .sidebar
+
+    /// 顶栏几何配置按视觉元素命名，避免把系统材质枚举名泄漏成业务组件名。
+    static let titlebarHeight: CGFloat = 52
+    static let titlebarFadeHeight: CGFloat = 24
+    // 提高主体模糊半径，让滚入顶栏的正文更快失焦；总高度和底部过渡区不变。
+    static let titlebarMaxBlurRadius: CGFloat = 256
+}
+
+/// 全窗共享一份磨砂背板，包括侧栏和标题栏下方；辅助功能实色回退由根视图负责。
+struct DashboardWindowBackdrop: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView { NSVisualEffectView() }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = DashboardSurfaceStyle.backdropMaterial
+        view.blendingMode = .behindWindow
+        view.state = .active
     }
 }
 
@@ -148,7 +175,7 @@ extension View {
         }
     }
 
-    /// 隐藏系统 window toolbar 自带背景，避免工具栏再铺一层独立实色（macOS 15+）。
+    /// 隐藏系统工具栏染色背景；自动背景实测出现白色横带，不能用它替代纯模糊。
     @ViewBuilder func hiddenWindowToolbarBackground() -> some View {
         if #available(macOS 15.0, *) {
             toolbarBackgroundVisibility(.hidden, for: .windowToolbar)

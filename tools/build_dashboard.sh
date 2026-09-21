@@ -5,6 +5,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE="$ROOT/native/CapsWriter"
 OUT="$ROOT/build/CapsWriterDashboard.app"
 
+# 新版 Command Line Tools 的 MacOSX27.0.sdk 在 SwiftPM 显式模块编译时缺少
+# SwiftUIMacros.StateMacro；项目仍支持 macOS 13，使用同一套 CLT 自带的 26.5 SDK
+# 可恢复 SwiftUI 宏编译。允许调用方用 CAPSWRITER_SDKROOT 显式覆盖。
+if [[ -n "${CAPSWRITER_SDKROOT:-}" ]]; then
+    export SDKROOT="$CAPSWRITER_SDKROOT"
+elif [[ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]]; then
+    export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+fi
+
 swift build --package-path "$PACKAGE" --product CapsWriterDashboard
 BIN="$(swift build --package-path "$PACKAGE" --show-bin-path)"
 # 旧构建整体保留，方便回滚；禁止清空目录或覆盖重要现有产物。

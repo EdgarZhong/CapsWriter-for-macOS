@@ -50,12 +50,14 @@ private final class DashboardState: ObservableObject {
 private struct DashboardView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var selection: Page? = .overview
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
     @StateObject private var model = DashboardState()
     @StateObject private var resources = ResourceStore()
     @AppStorage("dashboard.appearance") private var appearance = DashboardAppearance.system
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     private var page: Page { selection ?? .overview }
     private var readiness: Readiness { Readiness(model.result) }
+    private var isSidebarCollapsed: Bool { sidebarVisibility == .detailOnly }
 
     var body: some View {
         // 透明 NSWindow 只做合成容器；磨砂背板是 SwiftUI 根 ZStack 的最底层。
@@ -63,13 +65,19 @@ private struct DashboardView: View {
         // 「全不透明」或「标题栏白色残块」。macOS 无 navigation 系 containerBackground
         // placement，分列背景由窗口透明与各列自身背景设置承担。
         ZStack {
-            DashboardGlassBackground().ignoresSafeArea()
-            NavigationSplitView {
-                sidebar
+            // 辅助功能回退用整窗实色；常规外观共享同一块磨砂背板。
+            if reduceTransparency {
+                Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+            } else {
+                DashboardWindowBackdrop().ignoresSafeArea()
+            }
+            NavigationSplitView(columnVisibility: $sidebarVisibility) {
+                sidebar.modifier(DashboardSidebarToggleRemoval())
             } detail: {
                 // 干净的单层滚动区：窗口已开 fullSizeContentView + 透明标题栏（见
                 // WindowConfigurator），ScrollView 内容自动延伸到标题栏下方，
-                // 安全区内边距保证初始内容不被遮挡，无需手工补 padding 或自绘渐隐层。
+                // 安全区内边距保证初始内容不被遮挡；窗口级 ProgressiveTitlebarBackdrop
+                // 会在内容滚入标题栏时对其施加可变半径模糊，不在 ScrollView 内占布局高度。
                 ScrollView {
                     VStack(alignment: .leading, spacing: 28) {
                         HStack {
@@ -92,25 +100,51 @@ private struct DashboardView: View {
                     .padding(32)
                     .frame(maxWidth: 940, alignment: .leading).frame(maxWidth: .infinity)
                 }
-                // 第二层职责由系统承担：内容向上滚动时在标题栏层下缘柔和渐隐。
-                .modifier(SoftScrollEdge())
-                .toolbar {
-                    ToolbarItem(placement: .automatic) {
-                        // 唯一外观入口：原生三段切换，不在侧栏或设置页重复。
-                        Picker("外观", selection: $appearance) {
-                            ForEach(DashboardAppearance.allCases) { mode in
-                                Image(systemName: mode.symbol).tag(mode)
-                                    .help(mode.title).accessibilityLabel(mode.title)
-                            }
-                        }.pickerStyle(.segmented).labelsHidden().frame(width: 120)
-                            .accessibilityLabel("窗口外观").help("跟随系统、浅色或深色")
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        withAnimation {
+                            sidebarVisibility = isSidebarCollapsed ? .all : .detailOnly
+                        }
+                    } label: {
+                        Label(
+                            isSidebarCollapsed ? "显示侧栏" : "隐藏侧栏",
+                            systemImage: "sidebar.leading"
+                        )
                     }
+                    .help(isSidebarCollapsed ? "显示侧栏" : "隐藏侧栏")
+                    .accessibilityLabel(isSidebarCollapsed ? "显示侧栏" : "隐藏侧栏")
+                }
+                if #available(macOS 26.0, *) {
+                    // macOS 26 的系统 flexible spacer 只负责分隔 toolbar 两端，
+                    // 不改变外观 Picker 的 SwiftUI 原生渲染环境。
+                    ToolbarSpacer(.flexible)
+                }
+                ToolbarItem {
+                    // 唯一外观入口：原生三段切换，不在侧栏或设置页重复。
+                    Picker("外观", selection: $appearance) {
+                        ForEach(DashboardAppearance.allCases) { mode in
+                            Image(systemName: mode.symbol).tag(mode)
+                                .help(mode.title).accessibilityLabel(mode.title)
+                        }
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 120)
+                        .accessibilityLabel("窗口外观").help("跟随系统、浅色或深色")
                 }
             }
+            .modifier(DashboardWindowTitle(showTitle: isSidebarCollapsed))
         }
         .clearWindowContainerBackground()
         .hiddenWindowToolbarBackground()
         .background(WindowConfigurator())
+        .background(
+            ProgressiveTitlebarBackdrop(
+                titlebarHeight: DashboardSurfaceStyle.titlebarHeight,
+                fadeHeight: DashboardSurfaceStyle.titlebarFadeHeight,
+                maxBlurRadius: DashboardSurfaceStyle.titlebarMaxBlurRadius,
+                isEnabled: !reduceTransparency
+            )
+        )
         .preferredColorScheme(appearance.scheme)
         .task {
             resources.refresh()
@@ -124,10 +158,19 @@ private struct DashboardView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 10) {
-                BrandIcon(size: 44)
-                Text("CapsWriter").font(.headline)
-            }.padding(.horizontal, 20).padding(.top, 20)
+            // 标题保持单行，避免窗口记忆了窄列宽时品牌名被拆成两行。
+            VStack(alignment: .leading, spacing: 2) {
+                Text("CapsWriter")
+                    .font(.title.weight(.bold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text("for macOS")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
             List(selection: $selection) {
                 ForEach(Page.allCases) { item in
                     Label(item.rawValue, systemImage: item.symbol)
@@ -137,12 +180,14 @@ private struct DashboardView: View {
             Label("本地语音输入", systemImage: "lock.shield")
                 .font(.caption).foregroundStyle(.secondary).padding(20)
         }
-        .background {
-            if reduceTransparency { Color(nsColor: .windowBackgroundColor) }
-            else if #available(macOS 26.0, *) { Color.clear }
-            else { SidebarMaterial(opaque: false) }
-        }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        // 让原生侧栏使用完整背板，不再覆盖第二份 behindWindow 材质。
+        .background(Color.clear)
+        // 内容声明最小宽度，避免 macOS 记住旧的窄分栏值后再次压缩品牌标题。
+        .frame(minWidth: 190, alignment: .leading)
+        // 分栏分别参与窗口工具栏配置，统一隐藏染色背景，避免侧栏保留独立亮带。
+        .hiddenWindowToolbarBackground()
+        // 默认宽度贴近参考图，仍保留拖动扩展空间。
+        .navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 280)
     }
 
     private var overview: some View {
