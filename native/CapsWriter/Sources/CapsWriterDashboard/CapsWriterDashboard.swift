@@ -138,6 +138,7 @@ private struct DashboardView: View {
         }
         .clearWindowContainerBackground()
         .hiddenWindowToolbarBackground()
+        .disabledWindowFullScreen()
         .background(WindowConfigurator())
         .background(
             ProgressiveTitlebarBackdrop(

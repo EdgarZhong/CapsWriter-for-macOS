@@ -76,6 +76,20 @@ final class WindowConfiguratorHostView: NSView {
         window.backgroundColor = .clear
         // 关闭硬分隔而保留系统控件；不再注入失效的 Core Image sibling overlay。
         window.titlebarSeparatorStyle = .none
+
+        // Dashboard 只维护普通窗口模式。macOS 全屏会切换到另一套标题栏、工具栏
+        // 和内容布局，与当前透明窗口合成方式不兼容，因此从窗口能力层彻底关闭全屏。
+        // 先清掉系统或 SwiftUI 可能预先写入的互斥标志，避免允许与禁止 tiling
+        // 同时存在而触发 AppKit 异常；普通缩放、拖动和最小化能力保持不变。
+        var behavior = window.collectionBehavior
+        behavior.remove(.fullScreenPrimary)
+        behavior.remove(.fullScreenAuxiliary)
+        behavior.remove(.fullScreenAllowsTiling)
+        behavior.remove(.fullScreenNone)
+        behavior.remove(.fullScreenDisallowsTiling)
+        behavior.insert(.fullScreenNone)
+        behavior.insert(.fullScreenDisallowsTiling)
+        window.collectionBehavior = behavior
     }
 }
 
@@ -190,6 +204,16 @@ extension View {
     @ViewBuilder func hiddenWindowToolbarBackground() -> some View {
         if #available(macOS 15.0, *) {
             toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            self
+        }
+    }
+
+    /// macOS 15+ 由 SwiftUI scene 层关闭全屏入口；macOS 13–14 继续由
+    /// WindowConfigurator 的 AppKit collectionBehavior 提供同一策略。
+    @ViewBuilder func disabledWindowFullScreen() -> some View {
+        if #available(macOS 15.0, *) {
+            windowFullScreenBehavior(.disabled)
         } else {
             self
         }
