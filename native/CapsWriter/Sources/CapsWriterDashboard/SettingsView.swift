@@ -202,8 +202,12 @@ final class SettingsStore: ObservableObject {
                          completion: @escaping @MainActor (SettingsListResponse) -> Void) {
         Task {
             do {
+                // Swift 6 的并发检查禁止把含有 Any 的主 actor 字典直接送入
+                // detached task；先在主 actor 上编码成不可变 Data，保持桥接 JSON
+                // 结构不变，同时让后台进程调用满足 Sendable 边界。
+                let payloadData = try payload.map { try JSONSerialization.data(withJSONObject: $0) }
                 let response = try await Task.detached(priority: .userInitiated) {
-                    try Self.runBridge(action: action, payload: payload)
+                    try Self.runBridge(action: action, payloadData: payloadData)
                 }.value
                 completion(response)
             } catch {
@@ -214,7 +218,7 @@ final class SettingsStore: ObservableObject {
     }
 
     // 进程执行在后台线程完成，必须脱离 MainActor 隔离，否则阻塞主线程。
-    nonisolated private static func runBridge(action: String, payload: [String: Any]?) throws -> SettingsListResponse {
+    nonisolated private static func runBridge(action: String, payloadData: Data?) throws -> SettingsListResponse {
         guard let configURL = Bundle.main.url(forResource: "development-paths", withExtension: "json") else {
             throw NSError(domain: "Dashboard", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "请通过构建脚本生成开发 App 后运行。"])
@@ -232,15 +236,14 @@ final class SettingsStore: ObservableObject {
         // 合并输出后持续读取，防止日志塞满管道；结果取最后一行 JSON。
         process.standardOutput = pipe; process.standardError = pipe
         var stdin: Pipe?
-        if payload != nil {
+        if payloadData != nil {
             let input = Pipe()
             process.standardInput = input
             stdin = input
         }
         try process.run()
-        if let stdin, let payload {
-            let data = try JSONSerialization.data(withJSONObject: payload)
-            stdin.fileHandleForWriting.write(data)
+        if let stdin, let payloadData {
+            stdin.fileHandleForWriting.write(payloadData)
             try? stdin.fileHandleForWriting.close()
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()

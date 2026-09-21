@@ -1,10 +1,11 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 import PackageDescription
 
-// 状态兼容层独立于窗口，便于在不启动日常服务的情况下验证迁移边界。
+// Dashboard 只面向 macOS 26.0+ Apple Silicon；状态检查仍独立于窗口，便于
+// 在不启动日常服务的情况下验证快照边界。
 let package = Package(
     name: "CapsWriter",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v26)],
     products: [
         .library(name: "DashboardCore", targets: ["DashboardCore"]),
         .executable(name: "CapsWriterDashboard", targets: ["CapsWriterDashboard"]),

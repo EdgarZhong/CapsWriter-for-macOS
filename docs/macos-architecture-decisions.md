@@ -65,11 +65,11 @@ CapsWriter 原生客户端
 
 **目标**：为新增 Dashboard 提供可验证的真实客户端状态，先建立 Swift 与现有 Python 快照格式的兼容边界。
 
-**架构与技术栈**：macOS 13+、Swift Package Manager、Foundation；后续 SwiftUI 窗口消费 `DashboardCore`，此层不监听快捷键、不启动服务、不读取用户词库。原生客户端完整迁移仍按第零节职责推进，本阶段只读适配不等于迁移完成。
+**架构与技术栈**：macOS 26.0+、Apple Silicon（arm64）、Swift Package Manager、Foundation；后续 SwiftUI 窗口消费 `DashboardCore`，此层不监听快捷键、不启动服务、不读取用户词库。原生客户端完整迁移仍按第零节职责推进，本阶段只读适配不等于迁移完成。
 
 **规格**：本节遵循第零节应用与分发边界。执行按 `executing-plans` 逐项验证；完成状态只记录在 `CLAUDE.md`。
 
-1. 新建 `native/CapsWriter/Package.swift`，提供 `DashboardCore` 库与 `DashboardCoreChecks`，最低 macOS 13，无外部依赖。
+1. 新建 `native/CapsWriter/Package.swift`，提供 `DashboardCore` 库与 `DashboardCoreChecks`，最低 macOS 26.0、目标架构 arm64，无外部依赖。
 2. 新建 `Sources/DashboardCore/ClientSnapshot.swift`：`ClientSnapshot` 解码现有 `state/server_connected/accessibility_ok/microphone_ok/last_heartbeat/last_error`；`SnapshotReader.read(at:now:)` 返回状态，不向文件写入。当前 Python 时间戳无时区，必须按本机时区解析；允许未来带时区格式。快照超过 10 秒、时间在未来或无法解析时，禁止显示为可用。
 3. 状态区分未运行、无法读取、状态过期、启动中、连接中、可用、录音中和错误；未知状态按错误处理，字段异常不静默伪装为正常。
 4. 在 `Sources/DashboardCoreChecks/main.swift` 用合成 JSON 验证：Python 格式、断连、过期、未来时间、未知状态、缺失和损坏文件。使用内存合成夹具和不存在的临时路径，不触碰真实状态与权限。
@@ -79,9 +79,9 @@ CapsWriter 原生客户端
 
 原生 macOS 26 Liquid Glass；玻璃用于侧栏与外观控件，内容采用清晰稳定的分层表面。复用 `assets/icon/app-icon.png` 和 `.icns`，不生成替代标志。侧栏保留原生导航、壁纸透色与键盘行为。外观提供跟随系统、浅色、深色，保存于独立开发 App 的 UserDefaults，不修改系统外观。
 
-设计基准：冷蓝 `#397AC2`、冰蓝 `#D9E9FA`、浅表面 `#F5F7FA`、深表面 `#151B25`；文字与状态实际使用系统语义色以适配深浅色和对比度。标题用 SF Pro 系统标题字重，键帽用 SF Rounded，辅助数值用系统等宽字体。8/16/24/32 间距；单一视觉记忆点为 Caps Lock 键帽与装饰声纹，声纹不是实时音量计。减少透明度时使用不透明系统背景，不依赖动画表达状态。macOS 13–25 回退系统材质。
+设计基准：冷蓝 `#397AC2`、冰蓝 `#D9E9FA`、浅表面 `#F5F7FA`、深表面 `#151B25`；文字与状态实际使用系统语义色以适配深浅色和对比度。标题用 SF Pro 系统标题字重，键帽用 SF Rounded，辅助数值用系统等宽字体。8/16/24/32 间距；单一视觉记忆点为 Caps Lock 键帽与装饰声纹，声纹不是实时音量计。减少透明度时使用不透明系统背景，不依赖动画表达状态。当前不维护 macOS 25 及以下回退材质。
 
-布局：原生侧栏（品牌 / 四页导航 / 外观选择）＋正文（紧凑页标题 / 听写状态与键帽 / 服务及权限 / 操作说明）。不用满屏玻璃卡片，避免大面积模糊影响可读性。以浅色与深色截图、原生选择行为、状态兼容回归和签名校验验收当前视觉迭代。
+布局：原生侧栏（品牌 / 四页导航 / 外观选择）＋正文（紧凑页标题 / 听写状态与键帽 / 服务及权限 / 操作说明）。不用满屏玻璃卡片，避免大面积模糊影响可读性。Dashboard 只支持普通窗口，系统全屏与 full-screen tiling 均禁用。以浅色与深色截图、原生选择行为、状态兼容回归和签名校验验收当前视觉迭代。
 
 ### Dashboard 窗口与开发包
 

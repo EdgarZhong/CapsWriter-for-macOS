@@ -21,9 +21,11 @@
 
 ## 系统要求
 
-- macOS 13 及以上，Apple Silicon（M1 / M2 / M3 / M4 / M5）
+- macOS 26.0 及以上，Apple Silicon（arm64；M1 / M2 / M3 / M4 / M5）
 - Python 3.13（推荐用 [mise](https://mise.jdx.dev/) 管理）
 - [uv](https://docs.astral.sh/uv/)（依赖安装工具）
+
+Dashboard 只支持普通窗口，不提供系统全屏模式。
 
 ## 安装
 

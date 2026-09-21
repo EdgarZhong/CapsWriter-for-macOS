@@ -5,14 +5,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE="$ROOT/native/CapsWriter"
 OUT="$ROOT/build/CapsWriterDashboard.app"
 
-# 新版 Command Line Tools 的 MacOSX27.0.sdk 在 SwiftPM 显式模块编译时缺少
-# SwiftUIMacros.StateMacro；项目仍支持 macOS 13，使用同一套 CLT 自带的 26.5 SDK
-# 可恢复 SwiftUI 宏编译。允许调用方用 CAPSWRITER_SDKROOT 显式覆盖。
-if [[ -n "${CAPSWRITER_SDKROOT:-}" ]]; then
-    export SDKROOT="$CAPSWRITER_SDKROOT"
-elif [[ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]]; then
-    export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+# Dashboard 的唯一构建基线是 Apple Silicon + macOS 26.0+、CLT 26.6、
+# Swift 6.3.x 与 SDK 26.5；不再为旧系统或其他工具链保留构建分支。
+if [[ "$(uname -m)" != "arm64" ]]; then
+    echo "CapsWriter Dashboard requires Apple Silicon (arm64)." >&2
+    exit 1
 fi
+MACOS_MAJOR="$(sw_vers -productVersion | awk -F. '{print $1}')"
+if (( MACOS_MAJOR < 26 )); then
+    echo "CapsWriter Dashboard requires macOS 26.0 or newer." >&2
+    exit 1
+fi
+SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+if [[ ! -d "$SDK_PATH" ]]; then
+    echo "Missing Dashboard build SDK: $SDK_PATH" >&2
+    exit 1
+fi
+export SDKROOT="$SDK_PATH"
 
 swift build --package-path "$PACKAGE" --product CapsWriterDashboard
 BIN="$(swift build --package-path "$PACKAGE" --show-bin-path)"
@@ -49,7 +58,7 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
 <key>CFBundleShortVersionString</key><string>0.3.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleIconFile</key><string>app-icon</string>
-<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

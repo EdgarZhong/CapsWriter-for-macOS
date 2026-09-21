@@ -1,6 +1,6 @@
 # CapsWriter for macOS 开发说明
 
-本文是三份核心文档中的稳定项目说明。安装、使用与常见问题见 [用户 README](readme.md)；协作规则、代码规范与开发测试 SOP 见 [AGENTS.md](AGENTS.md)；当前目标、任务与执行状态见 [CLAUDE.md](CLAUDE.md)。
+本文是开发向 README，记录稳定项目事实、架构、目录、环境、开发命令与重要文档索引。安装、使用与常见问题见 [用户 README](readme.md)；协作规则、代码规范与开发测试 SOP 见 [AGENTS.md](AGENTS.md)；当前目标、任务与执行状态见 [CLAUDE.md](CLAUDE.md)。
 
 ## 项目定位与现有能力
 
@@ -48,7 +48,7 @@ CapsWriter-Offline/
 
 ## 开发与测试环境
 
-- macOS 13 及以上、Apple Silicon；项目使用 Python 3.13 与 `.venv`，依赖由 uv 管理。
+- macOS 26.0 及以上、Apple Silicon（arm64）；项目使用 Python 3.13 与 `.venv`，依赖由 uv 管理。
 - 客户端与服务端依赖分别见 `requirements-client.txt`、`requirements-server.txt`；macOS 原生启动器构建需要 Apple 编译工具链。
 - 克隆时初始化 `mlx-qwen3-asr` 子模块；其跟踪分支为 `capswriter-macos`，版本以主仓库记录的子模块提交为准。
 - 按 [用户安装步骤](readme.md#安装) 准备模型、权限与运行环境。`bash install.sh` 会安装依赖、重建启动器并写入全局 CLI，不是只读检查。
@@ -121,7 +121,7 @@ Worker对同一连接的音频包与结束标记保持FIFO、跨连接轮转；�
 
 ## 原生 Dashboard 开发入口
 
-`native/CapsWriter` 是独立 Swift package，最低 macOS 13，使用系统 Swift 工具链；提供概览、设置、词库、推理方案与转录历史五页导航。概览读取现有客户端快照；设置、词库与历史修订通过 `tools/dashboard_*.py` 桥接现有文件；推理方案提供资源检查和准备入口。右上角提供持久化的跟随系统／浅色／深色外观选择。界面代码包含系统材质与减少透明度回退；视觉验收、页面交互及原生客户端迁移的当前进度统一见 `CLAUDE.md`。
+`native/CapsWriter` 是独立 Swift package，最低 macOS 26.0，仅支持 Apple Silicon（arm64），使用 Swift 6.3.x；提供概览、设置、词库、推理方案与转录历史五页导航。概览读取现有客户端快照；设置、词库与历史修订通过 `tools/dashboard_*.py` 桥接现有文件；推理方案提供资源检查和准备入口。右上角提供持久化的跟随系统／浅色／深色外观选择。Dashboard 只支持普通窗口，系统全屏与 full-screen tiling 已禁用。视觉验收、页面交互及原生客户端迁移的当前进度统一见 `CLAUDE.md`。
 
 ```bash
 # 无 XCTest 依赖的合成状态兼容检查，不读写真实用户状态。
@@ -130,7 +130,7 @@ swift run --package-path native/CapsWriter DashboardCoreChecks
 bash tools/build_dashboard.sh
 ```
 
-Dashboard 当前固定开发工具链基线：Command Line Tools for Xcode 26.6、Swift/SwiftPM 6.3.x、macOS SDK 26.5、最低部署目标 macOS 13。不要使用 CLT 27 / Swift 6.4 作为当前 Dashboard 构建基线；工具链迁移需要单独完成验证。构建前应让 `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，不要用临时 `SDKROOT`、`DEVELOPER_DIR` 或 `TOOLCHAINS` 覆盖基线。
+Dashboard 当前固定开发工具链基线：Command Line Tools for Xcode 26.6、Swift/SwiftPM 6.3.x、macOS SDK 26.5、最低部署目标 macOS 26.0、目标架构 `arm64`。不要使用 CLT 27 / Swift 6.4 或其他 SDK 作为当前 Dashboard 构建基线。构建前应让 `xcode-select -p` 指向 `/Library/Developer/CommandLineTools`，不得用临时 `SDKROOT`、`DEVELOPER_DIR` 或 `TOOLCHAINS` 覆盖基线。
 
 产物位于 `build/CapsWriterDashboard.app`，使用独立开发 Bundle ID。概览读取 `~/.capswriter/state/status.json`；设置保存、词库修改与历史修订由各页面的显式操作触发并经过 Python 桥接。Dashboard 不监听快捷键、不占用麦克风。开发签名不等同于分发签名或公证；此包没有捆绑 Python/ASR，不是完整 DMG 产品。
 
