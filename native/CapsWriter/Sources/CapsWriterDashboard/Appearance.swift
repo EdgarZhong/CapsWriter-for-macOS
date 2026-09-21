@@ -11,8 +11,19 @@ enum DashboardAppearance: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self { case .system: return "circle.lefthalf.filled"; case .light: return "sun.max"; case .dark: return "moon" }
     }
-    var scheme: ColorScheme? {
-        switch self { case .system: return nil; case .light: return .light; case .dark: return .dark }
+
+    /// 只由 Dashboard 右上角的三档 Picker 调用，设置当前 App 的原生外观。
+    /// `NSApp.appearance = nil` 是 AppKit 的正式“跟随系统”语义，系统在自动
+    /// 切换亮/暗模式时会自行更新窗口，不需要把系统状态复制成第三种 SwiftUI 值。
+    func applyToApplication() {
+        switch self {
+        case .system:
+            NSApp.appearance = nil
+        case .light:
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 }
 

@@ -3,7 +3,6 @@ import SwiftUI
 
 /// 授权属于客户端启动引导，独立于持久化听写/识别设置。
 struct PermissionsView: View {
-    @AppStorage("dashboard.appearance") private var appearance = DashboardAppearance.system
     @StateObject private var resources = ResourceStore()
     @State private var error: String?
     var body: some View {
@@ -33,7 +32,6 @@ struct PermissionsView: View {
                 Button("启动客户端") { resources.startClient() }.disabled(resources.busy)
             }
         }.padding(28).frame(width: 500)
-            .preferredColorScheme(appearance.scheme)
     }
     private func row(_ title: String, detail: String, icon: String, pane: String) -> some View {
         HStack(spacing: 12) {

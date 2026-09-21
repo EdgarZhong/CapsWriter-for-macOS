@@ -63,15 +63,16 @@
   - 工具链恢复后的干净 `bash tools/build_dashboard.sh` 构建通过，新的 Mach-O 为 `minos 13.0 / sdk 26.5 / ld 1267.0`，开发包严格签名校验通过。普通窗口浅色/深色及侧栏收起/展开检查未见缺失控件或崩溃；切换过程中系统日志记录了非崩溃的 `AppKit Invalid view geometry: width/height is negative`，本轮不修，留给后续 UI 专项。
   - 标题控制采用 macOS 15+ 官方 `toolbar(removing: .title)`；侧栏按钮通过同一份 `sidebarVisibility` 在 `.all` 与 `.detailOnly` 间切换，移除了 NavigationSplitView 默认 sidebar toggle。macOS 26 使用同一根 `NavigationSplitView` toolbar 中的 `ToolbarSpacer(.flexible)` 将原生外观 Picker 推到 trailing，旧系统保持原自动布局。
   - 2026-09-20 普通窗口验收：侧栏展开时标题不存在、收起时 AX 树出现 `CapsWriter`、再次展开后标题消失；外观开关保留原生 segmented 样式并移动到标题栏右侧，未进入正文 overlay 或渐进模糊层。
-  - 侧栏品牌区已改为单行 `CapsWriter` + `for macOS`，分栏默认宽度调整为约 205pt；最新普通窗口 AX 实测约 198pt，已接近参考图，仍可拖动扩展。红绿灯附近的系统蓝绿色环境光晕尚未改色，未添加独立色块。
+  - 2026-09-21 外观跟随系统修复：仅主 Dashboard 右上角三档 Picker 负责外观；浅色/深色写入当前 App 的 `NSApp.appearance`，跟随系统写入 `nil` 交还 macOS 自动切换。权限窗口已移除 `dashboard.appearance` 读取和颜色方案绑定。当前系统为亮色，已实测“跟随系统 → 深色 → 跟随系统”恢复亮色。
+  - 侧栏品牌区保持单行 `CapsWriter` + `for macOS`；按用户参考图实测，默认 Dashboard 窗口调整为 `1000×700pt`（普通窗口截图约 `998×702pt`），侧栏 ideal 宽度调整为 `212pt`，副标题调整为 `16pt`，品牌标题继续使用系统 `.title`。红绿灯附近的系统蓝绿色环境光晕尚未改色，未添加独立色块。
   - 上述扩散原因仍是实现层假设，截图只证明本机当前构建的两个场景；减少透明度、窗口 resize、macOS 13–25 回退和完整第五节验收仍未完成。
   - 已失败历史供排查：`NSVisualEffectView(.titlebar, .withinWindow)` 配 CALayer mask 曾无模糊；AppKit 材质 overlay 配 `maskImage` 曾只见实心带。本轮上述三次修复复测亦未通过，按 UAT 流程暂停试错并建议用原生最小复现隔离系统行为。
   - 用户已授权 computer use 操作普通尺寸开发窗口验收；最新优先级为顶栏模糊，侧栏更透暂缓。浅色和深色均已做窗口截图复测，减少透明度与其他视觉项尚未完成本轮复测。
 
 - 后续：接入模型首次下载/本地导入的完整引导，推进原生客户端迁移与完整 DMG。当前开发包不含 Python/ASR，不能作为完整产品交付。
-- 验证：5 组 Swift 状态兼容检查、窗口编译与开发包签名校验通过；实机检查四页导航、真实状态显示与浅色/深色切换。减少透明度和 macOS 13–25 回退仅完成代码接入，未实机验收。其余页面操作、原生听写迁移、完整 DMG 和用户验收未完成。
+- 验证：5 组 Swift 状态兼容检查、窗口编译与开发包签名校验通过；实机检查四页导航、真实状态显示、浅色/深色切换及跟随系统回切。减少透明度和 macOS 13–25 回退仅完成代码接入，未实机验收。其余页面操作、原生听写迁移、完整 DMG 和用户验收未完成。
 - 资源修正：`models/Qwen3-ASR-MLX/Qwen3-ASR-1.7B-8bit/` 此前混入 4bit 仓库的 `config.json` 与 `README.md`（权重文件本身即官方 8bit），已按官方 8bit 仓库替换并补齐 `model.safetensors.index.json`；旧文件备份于 `.archive/qwen3-asr-8bit-metadata-20260920-110246/`，Dashboard 资源不一致警告已消除。
-- 未改个人配置、词库或日常服务；开发窗口使用独立 Bundle ID。未提交、未推送。
+- 未改个人配置、词库或日常服务；开发窗口使用独立 Bundle ID。工具链恢复基线已提交为 `aae1247`；本轮跟随系统修复尚未另行提交，等待用户验收。
 
 ## 本轮材质修复执行计划（2026-09-20）
 
@@ -82,7 +83,7 @@
 - [x] 接入侧栏工具栏背景配置并撤回失败的自定义滤镜；浅色未见原先独立亮带。
 - [x] 顶栏纯模糊：已按最终方案接入窗口级 `CIMaskedVariableBlur`；首版几何失败后已收回为标题栏同厚度，并完成两次滚动截图复测，仍需后续覆盖更多验收场景。
 - [x] 标题与工具栏联动：使用官方标题移除 API 和单一侧栏可见性绑定，完成收起/展开/再展开三态窗口验收；macOS 26 用 `ToolbarSpacer(.flexible)` 完成外观开关右对齐验收。
-- [ ] 核对侧栏通透关系、外观切换与减少透明度回退。
+- [x] 核对外观切换与跟随系统回切；侧栏通透关系、减少透明度回退仍待验收。
 - [x] `bash tools/build_dashboard.sh` 构建及签名校验通过；`swift run --package-path native/CapsWriter DashboardCoreChecks` 的 5 组状态兼容与 9 项就绪条件检查通过。
 - [ ] 按视觉规格第五节完整验收亮带、顶栏单层/模糊、滚动柔化、侧栏更透、深浅色、减少透明度与 resize；当前仅完成深浅色和两次滚动截图的局部验证。
 - 桌面限制：已授权 computer use 操作开发 Dashboard 普通窗口验收；禁止采样背板、全屏或大面积覆盖窗口。

@@ -8,7 +8,9 @@ struct CapsWriterDashboard: App {
     var body: some Scene {
         WindowGroup("CapsWriter") {
             DashboardView().frame(minWidth: 860, minHeight: 640)
-        }.defaultSize(width: 1080, height: 760)
+        // 参考图按 Retina 2x 测量约为 998×702pt；用整百数作为默认值，
+        // 让新窗口落在同一尺寸档位，同时保留内容的最小可用尺寸。
+        }.defaultSize(width: 1000, height: 700)
         .commands { SidebarCommands() }
         Window("CapsWriter 权限", id: "permissions") {
             PermissionsView()
@@ -145,7 +147,11 @@ private struct DashboardView: View {
                 isEnabled: !reduceTransparency
             )
         )
-        .preferredColorScheme(appearance.scheme)
+        // 外观职责只在右上角 Picker；task(id:) 让每次选择变化都应用到当前 App。
+        // system 分支写入 nil，交还给 macOS 自动切换亮/暗模式。
+        .task(id: appearance) {
+            appearance.applyToApplication()
+        }
         .task {
             resources.refresh()
             while !Task.isCancelled {
@@ -165,7 +171,7 @@ private struct DashboardView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Text("for macOS")
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -186,8 +192,8 @@ private struct DashboardView: View {
         .frame(minWidth: 190, alignment: .leading)
         // 分栏分别参与窗口工具栏配置，统一隐藏染色背景，避免侧栏保留独立亮带。
         .hiddenWindowToolbarBackground()
-        // 默认宽度贴近参考图，仍保留拖动扩展空间。
-        .navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 280)
+        // 参考图按 Retina 2x 折算侧栏约 212pt；ideal 明确默认宽度，仍保留拖动扩展空间。
+        .navigationSplitViewColumnWidth(min: 190, ideal: 212, max: 280)
     }
 
     private var overview: some View {
