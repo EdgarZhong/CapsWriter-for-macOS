@@ -95,9 +95,12 @@ final class ProgressiveTitlebarAttachmentView: NSView {
     func installIfPossible() {
         guard let window, let contentView = window.contentView else { return }
 
-        // fullSizeContentView 下，contentView 的父视图才同时包含标题栏 chrome 和正文；
-        // 将 blurView 放在这个父视图上，才能实现“正文被模糊、toolbar 保持清晰”的层级。
-        let overlayHost = contentView.superview ?? contentView
+        // fullSizeContentView 下，contentView 的父视图同时包含标题栏 chrome 和正文。
+        // 找到 NavigationSplitView 后，把滤镜放进分栏本身，位于侧边栏视图之后、
+        // detail 视图之前；侧边栏由自己的材质和 z-order 保持清晰，滤镜仍能处理主画布。
+        let rootHost = contentView.superview ?? contentView
+        let splitView = findVerticalSplitView(in: rootHost)
+        let overlayHost: NSView = splitView ?? rootHost
 
         if hostView === overlayHost,
            contentReferenceView === contentView,
@@ -116,13 +119,14 @@ final class ProgressiveTitlebarAttachmentView: NSView {
         backdropView.maxBlurRadius = maxBlurRadius
         backdropView.isEnabled = isEnabled
 
-        // 正常路径把滤镜插到 contentView 上方；只有 contentView 没有父视图时才使用
-        // 自身作为 host，这个分支仅用于窗口初始化瞬间，后续会在下一轮重新挂载。
-        overlayHost.addSubview(
-            backdropView,
-            positioned: .above,
-            relativeTo: overlayHost === contentView ? nil : contentView
-        )
+        if let splitView, let detailView = splitView.subviews.dropFirst().first {
+            // 将滤镜插在 detail 视图上方；在 macOS 当前的 NSSplitView 绘制顺序中，
+            // 这会落在侧栏与 detail 之间，侧栏保持清晰而主画布仍进入滤镜输入。
+            splitView.addSubview(backdropView, positioned: .above, relativeTo: detailView)
+        } else {
+            // SwiftUI 层级尚未完成时退回根 host；下一次 installIfPossible 会重新挂载。
+            rootHost.addSubview(backdropView, positioned: .above, relativeTo: contentView)
+        }
 
         // 视觉规格要求顶栏与系统标题栏同一层厚度；fadeHeight 是这 52pt 内部的
         // 下缘过渡，不得再向正文方向额外叠一条可见高度。
@@ -130,11 +134,10 @@ final class ProgressiveTitlebarAttachmentView: NSView {
         heightConstraint = constraint
 
         NSLayoutConstraint.activate([
-            // contentView 已经通过 fullSizeContentView 延伸到标题栏下方；overlay 的顶部
-            // 与它一致，固定高度只覆盖标题栏这一层，避免遮住导航栏和正文首行。
-            backdropView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            backdropView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            backdropView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            // 分栏或根 host 都已延伸到标题栏下方，固定高度只覆盖标题栏这一层。
+            backdropView.topAnchor.constraint(equalTo: overlayHost.topAnchor),
+            backdropView.leadingAnchor.constraint(equalTo: overlayHost.leadingAnchor),
+            backdropView.trailingAnchor.constraint(equalTo: overlayHost.trailingAnchor),
             constraint
         ])
 
@@ -155,6 +158,19 @@ final class ProgressiveTitlebarAttachmentView: NSView {
         backdropView.maxBlurRadius = maxBlurRadius
         backdropView.isEnabled = isEnabled
     }
+
+    private func findVerticalSplitView(in view: NSView) -> NSSplitView? {
+        if let splitView = view as? NSSplitView, splitView.isVertical {
+            return splitView
+        }
+        for subview in view.subviews {
+            if let splitView = findVerticalSplitView(in: subview) {
+                return splitView
+            }
+        }
+        return nil
+    }
+
 }
 
 /// 位于窗口 frame 层级的透明滤镜视图。
@@ -208,9 +224,9 @@ private final class ProgressiveTitlebarBlurView: NSView {
         let size = bounds.size
         guard size.width > 0, size.height > 0 else { return }
 
-        // 本轮先用滤镜层局部坐标构造 mask，验证此前窗口坐标与 background filter 的
-        // extent 是否错位；这是一项待截图确认的假设，不把它当作已证实的系统行为。
-        let maskRect = bounds
+        // backgroundFilters 工作在窗口合成上下文中，mask 必须使用窗口坐标；否则
+        // 内容滚入标题栏时，局部 bounds 与 backdrop 输入图像会发生坐标错位。
+        let maskRect = convert(bounds, to: nil)
         guard force || size != previousSize else { return }
         previousSize = size
 
@@ -220,16 +236,14 @@ private final class ProgressiveTitlebarBlurView: NSView {
         }
 
         let transitionHeight = min(max(0, fadeHeight), size.height)
-        let gradientStart = maskRect.minY + size.height - transitionHeight
-        let gradientEnd = maskRect.maxY
-
-        // Core Image 坐标的 Y 轴向上：标题栏底部 24pt 从黑到白，代表从无模糊
-        // 快速过渡到最大模糊；其上方自然保持白色（最大 blur）。
+        // mask 黑色代表 0 blur，白色代表 blur.radius 指定的最大模糊。
+        // 标题栏最下沿从黑色开始，向上经过 24pt 渐变到白色；上方剩余区域
+        // 保持白色平台，因此形成“底部渐进、上方持续最大模糊”的 52pt 效果区。
         let gradient = CIFilter.smoothLinearGradient()
         gradient.color0 = CIColor.black
         gradient.color1 = CIColor.white
-        gradient.point0 = CGPoint(x: 0, y: gradientStart)
-        gradient.point1 = CGPoint(x: 0, y: gradientEnd)
+        gradient.point0 = CGPoint(x: maskRect.midX, y: maskRect.minY)
+        gradient.point1 = CGPoint(x: maskRect.midX, y: maskRect.minY + transitionHeight)
 
         let blur = CIFilter.maskedVariableBlur()
         blur.radius = Float(maxBlurRadius)

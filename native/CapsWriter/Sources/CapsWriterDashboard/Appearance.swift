@@ -154,8 +154,9 @@ enum DashboardSurfaceStyle {
     /// 顶栏几何配置按视觉元素命名，避免把系统材质枚举名泄漏成业务组件名。
     static let titlebarHeight: CGFloat = 52
     static let titlebarFadeHeight: CGFloat = 24
-    // 提高主体模糊半径，让滚入顶栏的正文更快失焦；总高度和底部过渡区不变。
-    static let titlebarMaxBlurRadius: CGFloat = 256
+    // 只控制标题栏主体的最大模糊强度；效果区域高度和渐变距离由上面两个参数负责。
+    // 30pt 用于观察强度差异；顶栏高度和底部过渡距离保持不变。
+    static let titlebarMaxBlurRadius: CGFloat = 30
 }
 
 /// 全窗共享一份磨砂背板，包括侧栏和标题栏下方；辅助功能实色回退由根视图负责。
