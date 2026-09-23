@@ -12,7 +12,7 @@
 - `CapsWriter.app` 的原生启动器嵌入 CPython，运行 Python 客户端；客户端负责快捷键、录音、热词处理和结果输出，菜单栏通过 macOS 原生能力集成。
 - 客户端通过 WebSocket 向服务端发送音频；`core/server/` 负责连接、任务调度和后端调用。
 - 默认 `qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子模块 Runner 调用 MLX。录音期间缓存音频，收到结束标记后推理；不等同于录音期间持续输出识别结果。
-- 当前安装方式为源码加 `install.sh`，尚未提供自包含 DMG。Swift 原生客户端与服务化是目标设计，详见架构规格第零节，不能视为现有实现。
+- 当前安装方式为源码加 `install.sh`，尚未提供自包含 DMG。Swift 原生客户端为已确认的目标架构，详见 [macOS 产品化架构定稿](docs/macos-产品化架构定稿.md)，不能视为现有实现。
 
 ## 项目目录结构
 
@@ -74,11 +74,13 @@ bash build_launcher.sh
 
 | 文档 | 路径 | 内容 |
 |------|------|------|
-| macOS 架构决策 | `docs/macos-architecture-decisions.md` | 现有 launchd、权限、录音与推理架构记录；第零节为客户端主导编排、独立计算服务与 DMG 的目标设计（尚未实施） |
+| macOS 产品化架构定稿 | `docs/macos-产品化架构定稿.md` | 2026-09-23 定稿的架构最高口径：Swift App 即客户端 runtime 终局、热词不服务化（private helper）、Paste 唯一上屏路线、正交上屏双设置、结果四段保留；与旧文档冲突处以本文为准 |
+| macOS 架构决策 | `docs/macos-architecture-decisions.md` | 现有 launchd、权限、录音与推理架构记录；第零节为客户端主导编排的目标设计（其中热词服务化口径已被上述定稿取代） |
 | Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
 | ASR 调优总文档 | `docs/ASR调优总文档.md` | ASR 默认值、回归排查证据、Worker延迟/顺序调度、语言前缀修复与回退方式、评测入口 |
 | 语音输入 Roadmap 与桌面助手设计 | `docs/语音输入roadmap与桌面助手设计.md` | 产品化范围、热词服务化与已知算法问题、后续 ASR/桌面助手路线、暂缓实施的灵动岛设想与 Golden Set 评测方案 |
 | Dashboard 窗口材质分层规格 | `docs/dashboard-窗口材质分层规格.md` | 整窗磨砂半透明三层结构（背板/顶栏渐进模糊/侧栏玻璃）的纯视觉口径、禁止项与逐项目视验收标准 |
+| Dashboard 顶栏渐进模糊排查记录 | `docs/dashboard-顶栏渐进模糊排查记录.md` | 顶栏探索历史、已确认的运行时视图层级、暂存源码参数、未验证假设与恢复顺序 |
 
 ---
 
