@@ -95,9 +95,7 @@ CapsWriter.app [Swift]
 ### 活跃：顶栏渐进模糊（唯一进行中的外观项）
 
 - 视觉口径：顶栏总高 52pt，底部 24pt 内从无模糊过渡到最大模糊，纯模糊无色带。
-- 已确认基线：`.archive/dashboard-build-20260920-224413-88977/`（半径 64 源码状态）；半径 256 未通过验收，不得作基线。
-- 实现：`ProgressiveTitlebarBackdrop`——代表视图管生命周期，`NSView.backgroundFilters` + `CIMaskedVariableBlur` 安装到窗口层级。
-- 当前未提交改动（2026-09-23 试验中）：滤镜改挂 NSSplitView 内 detail 视图上方（侧栏保持清晰、主画布进滤镜）；mask 改用窗口坐标（`convert(bounds, to: nil)`，修正滚入错位）；`titlebarMaxBlurRadius` 64→30 用于观察强度差异。
+- **已提交稳定基线（2026-09-23，`cecc735`）**：52pt 顶栏、24pt 渐变、30pt 最大模糊；滤镜挂 NSSplitView detail 上方、mask 用窗口坐标。22:42 归档基准（半径 64）完整保留于 `.archive/dashboard-build-20260920-224413-88977/`；半径 256 未通过验收，不得作基线。探索历史、失败方案与待验证假设见 `docs/dashboard-顶栏渐进模糊排查记录.md`。
 - 2026-09-23 运行时取证仅完成第 1 步，原始 140 行 dump 保存在 `.archive/dashboard-titlebar-runtime-20260923/runtime-trace.txt`：`makeNSView`、`updateNSView`、`viewDidMoveToWindow` 均执行；滤镜确实是 `NSSplitView` 子视图，但该实例 `arrangesAllSubviews=false`、`arrangedCount=2`、`backdropIsArranged=false`，因此当前滤镜不是分栏 pane。窗口坐标中滤镜为 `(0,648,1000,52)`，侧栏列为 `(0,0,198,700)`，系统标题栏容器为 `(0,648,1000,52)`。临时诊断源码已撤回并重建；未实施挂载层、mask 缓存、clear tail 或半径调整。
 - 用户最新反馈（待处理）：24pt 渐变的渐进感不明显（疑似渐变区太窄）；Max Blur 强度偏低希望更高；"36pt 会触发下半区透明"的疑问待解释。
 - 桌面限制：已授权 computer use 操作普通窗口验收；禁止全屏/大面积覆盖窗口。
@@ -105,7 +103,7 @@ CapsWriter.app [Swift]
 
 ### 待办
 
-- **本轮主线**：按「本轮产品化集成工作路线」施工（单一 App 骨架 + ServiceManager 托管 ASR + Swift 客户端 runtime 迁移 + 热词 private helper + 配置归 App + 旧物清理），等用户提供干净提交基线后开工。
+- **本轮主线**：按「本轮产品化集成工作路线」施工（单一 App 骨架 + ServiceManager 托管 ASR + Swift 客户端 runtime 迁移 + 热词 private helper + 配置归 App + 旧物清理）。**基线已形成（2026-09-23：`cecc735` 外观基线 + `fc3e75c` 文档提交），grill 收敛完毕（`.grill/capswriter-2026-09-23-productization-autonomous-scope.md`）：本轮范围=阶段 A 能力边界；验收分三阶段（A 纯自主 / B 晚饭无人值守真实系统能力，dev server 用 6016、用户离开前停旧 server / C 用户配合）；词库 Swift 直读写 + helper mtime 热重载。** 阶段 A 施工计划已写 `docs/plans/2026-09-23-产品化架构集成-阶段A.md`（未提交）；10 个 worktree 已建（`../CapsWriter-Offline-wt-T1`~`T10`，分支 `wt/T1`~`wt/T10`，均在 `fc3e75c`）。T2/T3 子 agent 曾分派后被用户暂停，已停止、零产出、各 worktree 干净。**下一步：用户确认计划文档 → 分派 T1-T10（T2/T3 可直接续跑）→ 主会话 review 合并与接线集成 → 整包验证并产出阶段 B/C 验收计划书。**
 - 模型首次下载/本地导入引导；自包含 DMG 与用户数据目录迁 Application Support；首次打开引导（Dashboard 先起、概览页承担引导）UX 打磨。
 - 设置页详细条目清单：另行专项，与用户逐条修订。
 - 界面规格四页（转录历史/热词管理/推理方案/概览）调整：等用户另行给口径，本线不主动排期。首次打开引导（Dashboard 先起、概览页承担引导）同属后续 UX 打磨。
